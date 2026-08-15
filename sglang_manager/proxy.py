@@ -35,7 +35,20 @@ _RequestFinished = Callable[[], None]
 
 
 def _forward_headers(headers: dict) -> dict:
-    return {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP}
+    """Forward client headers except hop-by-hop ones and ``content-length``.
+
+    ``content-length`` must never be forwarded verbatim: the manager may
+    rewrite the request body (e.g. injecting ``stream_options`` for usage
+    accounting), and httpx recomputes the correct length from the actual
+    bytes.  Forwarding a stale length breaks the upstream HTTP/1.1
+    connection (h11: "Too much data for declared Content-Length").
+    """
+
+    return {
+        k: v
+        for k, v in headers.items()
+        if k.lower() not in _HOP_BY_HOP and k.lower() != "content-length"
+    }
 
 
 class Proxy:

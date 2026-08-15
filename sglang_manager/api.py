@@ -85,6 +85,16 @@ def create_app(
             raise InvalidRequest("missing or invalid 'model' field in request body")
         started = time.monotonic()
         is_stream = bool(payload.get("stream"))
+        if is_stream:
+            # SGLang only sends the final SSE usage frame when explicitly
+            # requested; inject include_usage so our token accounting (and the
+            # client, transparently) gets real numbers.
+            opts = payload.get("stream_options")
+            if not isinstance(opts, dict):
+                opts = {}
+                payload["stream_options"] = opts
+            opts["include_usage"] = True
+            body = json.dumps(payload).encode()
 
         def record_usage(usage: dict | None, status: int | None) -> None:
             if recorder is None:

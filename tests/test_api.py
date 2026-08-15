@@ -13,11 +13,33 @@ from sglang_manager.errors import SglangStartupTimeout
 from sglang_manager.manager import ModelManager
 from sglang_manager.proxy import Proxy
 
-from .conftest import make_config
+from .conftest import FakeGpu, FakeRunner, make_config
 
 
-def make_upstream_app() -> FastAPI:
-    """A miniature SGLang: /health + /v1/chat/completions (SSE included)."""
+def test_forward_headers_strips_content_length():
+    """A stale content-length must never reach the upstream after a body
+    rewrite (real HTTP/1.1 would fail the request)."""
+    from sglang_manager.proxy import _forward_headers
+
+    out = _forward_headers(
+        {
+            "Content-Length": "123",
+            "Content-Type": "application/json",
+            "Authorization": "Bearer x",
+            "Host": "manager",
+            "Connection": "keep-alive",
+        }
+    )
+    assert "content-length" not in out
+    assert out["Content-Type"] == "application/json"
+    assert out["Authorization"] == "Bearer x"
+    assert "host" not in out
+    assert "connection" not in out
+
+
+def make_upstream_app(sink: dict | None = None) -> FastAPI:
+    """A miniature SGLang: /health + /v1/chat/completions (SSE included).
+    If ``sink`` is given, the last chat request body is copied into it."""
 
     app = FastAPI()
 
@@ -28,6 +50,8 @@ def make_upstream_app() -> FastAPI:
     @app.post("/v1/chat/completions")
     async def chat(request: Request):
         body = await request.json()
+        if sink is not None:
+            sink["last_body"] = body
         if body.get("stream"):
             async def gen():
                 for i in range(3):
@@ -172,6 +196,27 @@ async def test_streaming_proxy(stack):
     # accounting: only after the SSE stream fully closed is the request "done"
     assert manager.active_requests == 0
     assert manager.state.value == "running"
+
+
+async def test_stream_usage_injection():
+    """The manager must inject stream_options.include_usage so the upstream
+    sends the final usage frame (needed for token accounting)."""
+    cfg = make_config()
+    manager = ModelManager(cfg, gpu=FakeGpu(), runner=FakeRunner())
+    sink: dict = {}
+    upstream = make_upstream_app(sink)
+    proxy = Proxy("http://127.0.0.1:30000")
+    proxy._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream), timeout=None)
+    app = create_app(config=cfg, manager=manager, proxy=proxy)
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://manager"
+        ) as client:
+            await client.post(
+                "/v1/chat/completions",
+                json={"model": "qwen", "messages": [], "stream": True},
+            )
+            assert sink["last_body"]["stream_options"]["include_usage"] is True
 
 
 async def test_gateway_status(stack):

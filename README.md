@@ -240,6 +240,29 @@ SGLang 不需要 systemd 单元——manager 按需拉起/停止它。
 
 覆盖：按需启动、同模型直连不重启、显存不足 503、空闲切换、忙时拒绝切换、启动超时、并发同模型请求排队、进程意外退出、idle watchdog 卸载、SSE 流式代理计数等。
 
+## 真机验证记录（RTX 4090 48G，本地 Qwen3.6-35B-A3B-FP8 / Qwen3.6-27B-FP8）
+
+| 场景 | 结果 |
+|---|---|
+| 冷启动按需拉起 | 35B FP8 加载 86~188s（42 个 safetensors shard），health 轮询等真正 ready 后才转发 ✓ |
+| 同模型直连 | 二次请求 2.5s（无重启、不重查显存）✓ |
+| 流式 SSE | 真 token 流 + 末尾 usage 帧 ✓ |
+| 模型切换 35B→27B | `SWITCHING` ~90s（停旧→等显存释放→加载新）→ `RUNNING(27b)` ✓ |
+| 忙碌拒绝 | 有活跃请求时 `/gateway/stop` → 503 `model_switch_busy` ✓ |
+| force-stop | 强杀正在生成的 SGLang，显存 43.8G → 3.4G（仅剩桌面），计数自愈 ✓ |
+| usage 落账 | 普通/流式都记录真实 tokens ✓ |
+
+真机联调发现的三个真实 bug（均已修复并有测试）：
+
+1. **PYTHONPATH 泄漏**：manager 的 `PYTHONPATH` 污染 SGLang 子进程（导入错误的 pydantic 直接崩）→ 子进程默认剥离 PYTHONPATH，除非配置显式指定。
+2. **流式 usage 记 0**：SGLang 默认不在流尾发 usage 帧 → manager 自动注入 `stream_options.include_usage=true`。
+3. **转发 content-length 过期**：改写请求体（注入 stream_options）后，客户端原始 `content-length` 导致上游 h11 报错 → 转发头一律丢弃 content-length，由 httpx 按实际字节重算。
+
+真机使用注意：
+
+- **务必给请求加 `max_tokens`**：Qwen3.6 带 reasoning 的开放式问题会无限思考（实测无 max_tokens 时生成 11000+ tokens 不停），`finish_reason=length` 时内容可能全被 reasoning 吃掉，这是模型行为，不是 manager 的 bug。
+- `required_vram_gib` 要按 `mem_fraction_static × 总显存` 填（0.87×48≈42），再加 margin 后必须小于「总显存 − 外部占用」（本机桌面约 3.2G）。
+
 ## 目录
 
 ```text

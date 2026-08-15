@@ -240,6 +240,7 @@ class ModelManager:
 
         self.state = State.RUNNING
         self.current_model = spec.name
+        self._starting_model = None
         self.last_activity = self._now()
         self._resolve(self._start_future, None)
         logger.info("model %s ready", spec.name)
@@ -321,6 +322,8 @@ class ModelManager:
 
         self.state = State.RUNNING
         self.current_model = spec.name
+        self._switch_from = None
+        self._switch_to = None
         self.last_activity = self._now()
         self._resolve(self._switch_future, None)
         logger.info("switch complete: %s -> %s", from_model, spec.name)

@@ -49,6 +49,32 @@ def build_launch_command(cfg: SglangConfig, spec: ModelSpec, gpu_device: int) ->
     return cmd
 
 
+def build_process_env(
+    cfg: SglangConfig,
+    spec: ModelSpec,
+    gpu_device: int,
+    base_env: dict | None = None,
+) -> dict[str, str]:
+    """Environment for the SGLang child process.
+
+    The manager's own ``PYTHONPATH`` (e.g. pointing at its local deps dir)
+    must NOT leak into SGLang — the child must use its interpreter's own
+    site-packages (a leaked path has caused real breakage, e.g. a wrong
+    pydantic).  ``PYTHONPATH`` is only passed through when the config or the
+    model explicitly sets one.
+    """
+
+    env = {
+        **(os.environ if base_env is None else base_env),
+        "CUDA_VISIBLE_DEVICES": str(gpu_device),
+        **cfg.env,
+        **spec.sglang.env,
+    }
+    if "PYTHONPATH" not in cfg.env and "PYTHONPATH" not in spec.sglang.env:
+        env.pop("PYTHONPATH", None)
+    return env
+
+
 class SglangRunner:
     """Owns the SGLang subprocess. Only one instance at a time (single GPU,
     single active model — a core V1 constraint enforced by the manager)."""
@@ -76,12 +102,7 @@ class SglangRunner:
         if self.proc is not None and self.proc.returncode is None:
             raise SglangUnavailable(f"SGLang already running (pid {self.proc.pid})")
         cmd = build_launch_command(self.cfg, spec, self.gpu_device)
-        env = {
-            **os.environ,
-            "CUDA_VISIBLE_DEVICES": str(self.gpu_device),
-            **self.cfg.env,
-            **spec.sglang.env,
-        }
+        env = build_process_env(self.cfg, spec, self.gpu_device)
         self.proc = await asyncio.create_subprocess_exec(
             *cmd,
             env=env,

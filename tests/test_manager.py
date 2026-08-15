@@ -74,6 +74,8 @@ async def test_switch_when_idle(manager, gpu, runner):
     assert runner.stops == 1
     assert manager.state is State.RUNNING
     assert manager.current_model == "gemma"
+    assert manager.status()["switch_from"] is None  # cleared after success
+    assert manager.status()["switch_to"] is None
     assert gpu.release_waits == 1  # VRAM release waited for before the re-check
 
 
@@ -321,6 +323,9 @@ async def test_status_shape(manager, gpu, runner):
     status = manager.status()
     assert status["state"] == "running"
     assert status["model"] == "qwen"
+    assert status["starting_model"] is None  # cleared after a successful start
+    assert status["switch_from"] is None
+    assert status["switch_to"] is None
     assert status["active_requests"] == 0
     assert status["idle_timeout_seconds"] == 3600
     assert status["gpu"]["free_gib"] == 40
