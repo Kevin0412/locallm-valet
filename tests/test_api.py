@@ -223,6 +223,39 @@ async def test_gateway_stop_refused_when_busy(stack):
     manager.request_finished()
 
 
+async def test_gateway_force_stop_when_busy(stack):
+    client, manager, runner, gpu = stack
+    gpu.free_g = 40
+    await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
+    manager.request_started()  # in-flight request
+    resp = await client.post("/gateway/force-stop")
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "stopped"
+    assert manager.state.value == "stopped"
+    assert runner.stops == 1
+    manager.request_finished()
+
+
+async def test_gateway_stop_cancels_starting(stack):
+    """Idle stop during a pending startup: accepted, startup aborted,
+    the in-flight request fails cleanly."""
+    client, manager, runner, gpu = stack
+    gpu.free_g = 40
+    runner.health_delay = 0.3
+    task = asyncio.create_task(
+        client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
+    )
+    await asyncio.sleep(0.05)
+    assert manager.state.value == "starting"
+    resp = await client.post("/gateway/stop")
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "stopped"
+    r = await task
+    assert r.status_code == 503
+    assert r.json()["error"]["type"] == "sglang_unavailable"
+    assert manager.state.value == "stopped"
+
+
 async def test_gateway_preload(stack):
     client, manager, runner, gpu = stack
     gpu.free_g = 40

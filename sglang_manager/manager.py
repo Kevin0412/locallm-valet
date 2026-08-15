@@ -69,6 +69,9 @@ class ModelManager:
         self.last_activity: float = self._clock()
         self.started_at: float = self._clock()
         self._watchdog_task: asyncio.Task | None = None
+        # Set when an admin stop cancels an in-flight STARTING/SWITCHING
+        # transition; checked at safe points inside _start/_switch.
+        self._cancel_requested = False
 
         self.runner.on_exit = self._on_sglang_exit
 
@@ -96,6 +99,10 @@ class ModelManager:
         self._starting_model = None
         self._switch_from = None
         self._switch_to = None
+        # NOTE: _cancel_requested is deliberately NOT reset here — a stop that
+        # cancelled an in-flight transition must stay visible until that
+        # transition observes it at its next safe point.  It is reset at the
+        # start of every new transition (_start/_switch).
         self.last_activity = self._now()
 
     # ------------------------------------------------------------- lifecycle
@@ -187,6 +194,7 @@ class ModelManager:
         async with self._transition_lock:
             if self.state is not State.STOPPED:
                 return  # somebody else took care of it; re-evaluate in the gate loop
+            self._cancel_requested = False
             self.state = State.STARTING
             self._starting_model = spec.name
             self._start_future = asyncio.get_running_loop().create_future()
@@ -194,14 +202,25 @@ class ModelManager:
         try:
             # VRAM is checked BEFORE launching: never hard-start into a CUDA OOM.
             await self._check_vram(spec, context="start")
+            if self._cancel_requested:
+                raise SglangUnavailable("start cancelled by stop request")
             await self.runner.start(spec)
+            if self._cancel_requested:
+                raise SglangUnavailable("start cancelled by stop request")
             await self.runner.wait_health(self.cfg.sglang.startup_timeout_seconds)
+            if self._cancel_requested:
+                raise SglangUnavailable("start cancelled by stop request")
         except InsufficientGpuMemory as exc:
             logger.warning("start refused: %s", exc)
             self._fail_start(exc)
             raise
         except GpuUnavailable as exc:
             logger.error("start refused: %s", exc)
+            self._fail_start(exc)
+            raise
+        except SglangUnavailable as exc:
+            logger.info("start aborted: %s", exc)
+            await self._cleanup_after_failed_start()
             self._fail_start(exc)
             raise
         except SglangStartupTimeout as exc:
@@ -251,6 +270,7 @@ class ModelManager:
                     f"model {self.current_model!r} has {self.active_requests} active "
                     f"request(s); switch to {spec.name!r} refused (no preemption)"
                 )
+            self._cancel_requested = False
             self.state = State.SWITCHING
             self._switch_from = self.current_model
             self._switch_to = spec.name
@@ -265,15 +285,28 @@ class ModelManager:
                 self.cfg.gpu.vram_release_timeout_seconds,
                 self.cfg.gpu.vram_poll_interval_seconds,
             )
+            if self._cancel_requested:
+                raise SglangUnavailable("switch cancelled by stop request")
             await self._check_vram(spec, context="switch to")
+            if self._cancel_requested:
+                raise SglangUnavailable("switch cancelled by stop request")
             await self.runner.start(spec)
+            if self._cancel_requested:
+                raise SglangUnavailable("switch cancelled by stop request")
             await self.runner.wait_health(self.cfg.sglang.startup_timeout_seconds)
+            if self._cancel_requested:
+                raise SglangUnavailable("switch cancelled by stop request")
         except InsufficientGpuMemory as exc:
             logger.warning("switch refused after unloading %s: %s", from_model, exc)
             self._fail_switch(exc)
             raise
         except GpuUnavailable as exc:
             logger.error("switch aborted: %s", exc)
+            self._fail_switch(exc)
+            raise
+        except SglangUnavailable as exc:
+            logger.info("switch aborted: %s", exc)
+            await self._cleanup_after_failed_start()
             self._fail_switch(exc)
             raise
         except Exception as exc:
@@ -304,20 +337,54 @@ class ModelManager:
         else:
             fut.set_exception(exc)
 
-    async def stop(self, reason: str = "manual") -> None:
-        """Admin stop: refuse while busy or mid-transition."""
+    async def stop(self, reason: str = "manual", force: bool = False) -> None:
+        """Admin stop: unload SGLang and release VRAM.
+
+        Normal stop (``force=False``) is accepted whenever the system is
+        idle (``active_requests == 0``), in any state: a RUNNING model is
+        unloaded, an in-flight STARTING/SWITCHING transition is cancelled,
+        STOPPING is idempotent, STOPPED is a no-op.  Refused only while
+        requests are being served (no preemption).
+
+        Force stop (``force=True``) tears down unconditionally, even with
+        active requests — in-flight streaming connections are cut.  It exists
+        to reclaim VRAM from a stuck or unwanted workload.
+        """
 
         async with self._transition_lock:
             if self.state is State.STOPPED:
                 return
-            if self.state is not State.RUNNING:
-                raise ModelSwitchBusy(f"cannot stop while {self.state.value}")
-            if self.active_requests > 0:
+            if not force and self.active_requests > 0:
                 raise ModelSwitchBusy(
-                    f"cannot stop: {self.active_requests} active request(s)"
+                    f"cannot stop: {self.active_requests} active request(s); "
+                    f"use force-stop to override"
                 )
+            if self.state is State.STOPPING:
+                return  # an earlier stop is already tearing down (idempotent)
+            if self.state is State.STARTING:
+                logger.info("stop cancels in-flight start of %s", self._starting_model)
+                self._cancel_transition(SglangUnavailable("start cancelled by stop request"))
+            elif self.state is State.SWITCHING:
+                logger.info(
+                    "stop cancels in-flight switch %s -> %s",
+                    self._switch_from, self._switch_to,
+                )
+                self._cancel_transition(SglangUnavailable("switch cancelled by stop request"))
             self.state = State.STOPPING
         await self._do_stop(reason)
+
+    def _cancel_transition(self, exc: Exception) -> None:
+        """Fail the in-flight transition futures and flag cancellation so
+        ``_start``/``_switch`` abort at their next safe point — no new
+        SGLang process may be spawned after the stop decision."""
+
+        self._cancel_requested = True
+        for fut in (self._start_future, self._switch_future):
+            if fut is not None and not fut.done():
+                fut.set_exception(exc)
+        self._starting_model = None
+        self._switch_from = None
+        self._switch_to = None
 
     async def _do_stop(self, reason: str) -> None:
         try:

@@ -131,7 +131,13 @@ RUNNING(a) ──switch(b)──▶ SWITCHING(a→b) ──▶ RUNNING(b)  （�
 ```
 
 - `GET /gateway/models`：registry + 每个模型的加载状态。
-- `POST /gateway/stop`：手动卸载（忙时 `503 model_switch_busy`）。
+- `POST /gateway/stop`：**正常关闭（清显存）**——空闲时（`active_requests == 0`）
+  任意状态都接受：`RUNNING` 卸载模型，`STARTING`/`SWITCHING` 直接取消进行中的
+  启动/切换（等待中的请求收到 503 `sglang_unavailable`），`STOPPING` 幂等，
+  `STOPPED` 空操作；**正在服务时 503 `model_switch_busy`**（不抢占）。
+- `POST /gateway/force-stop`：**强制关闭（清显存）**——无条件拆除，即使有活跃
+  请求（流式连接会被切断），用于卡死/不再需要的 workload 抢回显存；返回当前
+  `active_requests`（被切断的请求自行收敛计数）。
 - `POST /gateway/preload/{model}`：提前暖模型，等 ready 后返回（用于预热场景）。
 
 ### 用量统计与看板（token usage）

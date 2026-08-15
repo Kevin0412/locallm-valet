@@ -11,6 +11,7 @@ from sglang_manager.errors import (
     ModelSwitchBusy,
     SglangStartupFailed,
     SglangStartupTimeout,
+    SglangUnavailable,
 )
 from sglang_manager.manager import ModelManager
 from sglang_manager.state import State
@@ -192,6 +193,66 @@ async def test_admin_stop_busy_then_ok(manager, gpu, runner):
 async def test_admin_stop_when_already_stopped(manager):
     await manager.stop()  # no-op
     assert manager.state is State.STOPPED
+
+
+async def test_stop_cancels_pending_start(manager, gpu, runner):
+    """Idle stop must be accepted while a model is still STARTING: the
+    startup is cancelled and nothing is left running."""
+    gpu.free_g = 40
+    runner.health_delay = 0.2
+    t = asyncio.create_task(manager.ensure_loaded("qwen"))
+    await asyncio.sleep(0.05)
+    assert manager.state is State.STARTING
+    await manager.stop()  # accepted while idle (active_requests == 0)
+    assert manager.state is State.STOPPED
+    assert runner.model is None  # no orphan process
+    with pytest.raises(SglangUnavailable):
+        await t  # the waiting request gets a clear error
+
+
+async def test_stop_cancels_pending_switch(manager, gpu, runner):
+    gpu.free_g = 40
+    await manager.ensure_loaded("qwen")
+    runner.health_delay = 0.2
+    t = asyncio.create_task(manager.ensure_loaded("gemma"))
+    await asyncio.sleep(0.05)
+    assert manager.state is State.SWITCHING
+    await manager.stop()
+    assert manager.state is State.STOPPED
+    assert runner.model is None
+    with pytest.raises(SglangUnavailable):
+        await t
+
+
+async def test_stop_idempotent_during_stopping(manager):
+    manager.state = State.STOPPING  # an earlier stop is mid-teardown
+    await manager.stop()  # no raise, no double teardown
+    assert manager.state is State.STOPPING
+
+
+async def test_force_stop_kills_busy(manager, gpu, runner):
+    """Force stop works even with active requests (normal stop refuses)."""
+    gpu.free_g = 40
+    await manager.ensure_loaded("qwen")
+    manager.request_started()  # in-flight request
+    with pytest.raises(ModelSwitchBusy):
+        await manager.stop()
+    await manager.stop(force=True)
+    assert manager.state is State.STOPPED
+    assert runner.stops == 1
+    manager.request_finished()  # the cut request self-heals the counter
+
+
+async def test_force_stop_during_starting(manager, gpu, runner):
+    gpu.free_g = 40
+    runner.health_delay = 0.2
+    t = asyncio.create_task(manager.ensure_loaded("qwen"))
+    await asyncio.sleep(0.05)
+    await manager.stop(force=True)
+    assert manager.state is State.STOPPED
+    with pytest.raises(SglangUnavailable):
+        await t
+    assert runner.model is None
 
 
 async def test_request_accounting(manager, gpu, runner):

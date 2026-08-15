@@ -183,8 +183,19 @@ def create_app(
 
     @app.post("/gateway/stop")
     async def gateway_stop():
+        """正常关闭：空闲时（任意状态）接受并清显存；正在服务时 503。"""
         await manager.stop(reason="manual")
         return {"state": manager.state.value, "model": manager.current_model}
+
+    @app.post("/gateway/force-stop")
+    async def gateway_force_stop():
+        """强制关闭：无条件清显存，即使有活跃请求（会切断流式连接）。"""
+        await manager.stop(reason="manual (forced)", force=True)
+        return {
+            "state": manager.state.value,
+            "model": manager.current_model,
+            "active_requests": manager.active_requests,
+        }
 
     @app.post("/gateway/preload/{model_name}")
     async def gateway_preload(model_name: str):
