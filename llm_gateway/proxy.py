@@ -1,9 +1,9 @@
-"""OpenAI-compatible reverse proxy towards the managed SGLang instance.
+"""OpenAI-compatible reverse proxy towards the managed backend.
 
-Transparent forwarding: method, path, query, headers and body go to SGLang
+Transparent forwarding: method, path, query, headers and body go to the backend
 verbatim; the response (including SSE streaming) comes back as-is.  Only hop-
 by-hop headers are stripped.  The client only ever talks to
-``http://manager:8000/v1`` and never learns about SGLang's address.
+``http://manager:8000/v1`` and never learns about the backend's address.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import httpx
 from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
-from .errors import SglangUnavailable
+from .errors import BackendUnavailable
 from .usage import SseUsageScanner
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class Proxy:
         try:
             return await self._client.send(request, stream=stream)
         except httpx.HTTPError as exc:
-            raise SglangUnavailable(f"SGLang unreachable at {self.base_url}: {exc}") from exc
+            raise BackendUnavailable(f"backend unreachable at {self.base_url}: {exc}") from exc
 
     @staticmethod
     def _response_headers(upstream_headers) -> dict:

@@ -3,10 +3,10 @@
 Concurrency model
 -----------------
 - All lifecycle work (start / stop / switch) is serialized behind one
-  ``asyncio.Lock`` (``_transition_lock``): at most one SGLang transition runs
-  at a time, so two racing requests can never start two SGLang instances.
+  ``asyncio.Lock`` (``_transition_lock``): at most one backend transition runs
+  at a time, so two racing requests can never start two backend instances.
 - Requests whose model already matches ``RUNNING`` never take that lock — they
-  are forwarded straight to SGLang.
+  are forwarded straight to the backend.
 - Requests that arrive while a transition for *their* model is in flight await
   the shared transition future, then re-evaluate the state machine.
 - Requests for a *different* model while a transition is in flight get
@@ -24,16 +24,16 @@ from typing import Protocol
 
 from .config import Config, ModelSpec
 from .errors import (
-    GpuUnavailable,
-    InsufficientGpuMemory,
+    MemoryUnavailable,
+    InsufficientMemory,
     ModelNotFound,
     ModelSwitchBusy,
-    SglangStartupFailed,
-    SglangStartupTimeout,
-    SglangUnavailable,
+    BackendStartupFailed,
+    BackendStartupTimeout,
+    BackendUnavailable,
 )
-from .gpu import GpuMonitorProtocol
-from .runner import SglangRunner
+from .memory import MemoryMonitorProtocol
+from .runner import BackendRunner
 from .state import State
 
 logger = logging.getLogger(__name__)
@@ -47,12 +47,12 @@ class ModelManager:
     def __init__(
         self,
         config: Config,
-        gpu: GpuMonitorProtocol,
-        runner: SglangRunner,
+        memory: MemoryMonitorProtocol,
+        runner: BackendRunner,
         clock: Clock = time.monotonic,
     ):
         self.cfg = config
-        self.gpu = gpu
+        self.memory = memory
         self.runner = runner
         self._clock = clock
 
@@ -73,7 +73,7 @@ class ModelManager:
         # transition; checked at safe points inside _start/_switch.
         self._cancel_requested = False
 
-        self.runner.on_exit = self._on_sglang_exit
+        self.runner.on_exit = self._on_backend_exit
 
     # ------------------------------------------------------------------ util
 
@@ -87,10 +87,10 @@ class ModelManager:
         return max(0.0, self._now() - self.last_activity)
 
     def _require_running(self) -> None:
-        """Fail fast if SGLang is dead but the state machine says RUNNING."""
+        """Fail fast if the backend is dead but the state machine says RUNNING."""
 
         if self.state is State.RUNNING and not self.runner.running:
-            logger.error("state=RUNNING but SGLang process is gone; forcing STOPPED")
+            logger.error("state=RUNNING but the backend process is gone; forcing STOPPED")
             self._force_stopped()
 
     def _force_stopped(self) -> None:
@@ -108,7 +108,7 @@ class ModelManager:
     # ------------------------------------------------------------- lifecycle
 
     async def ensure_loaded(self, model_name: str) -> ModelSpec:
-        """Gate: make sure SGLang is RUNNING with ``model_name``.
+        """Gate: make sure the backend is RUNNING with ``model_name``.
 
         Returns the model spec when ready; raises a typed error otherwise.
         This is the only place requests and transitions interact.
@@ -139,7 +139,7 @@ class ModelManager:
                 )
 
             if st is State.STOPPING:
-                raise SglangUnavailable("SGLang is stopping, retry in a moment")
+                raise BackendUnavailable("backend is stopping, retry in a moment")
 
             if st is State.SWITCHING:
                 if self._switch_to == model_name:
@@ -177,16 +177,46 @@ class ModelManager:
         self.active_requests = max(0, self.active_requests - 1)
         self.last_activity = self._now()
 
-    async def _check_vram(self, spec: ModelSpec, context: str) -> None:
-        free = self.gpu.free_gib()
-        margin = self.cfg.gpu.safety_margin_gib
-        needed = spec.required_vram_gib + margin
-        if free < needed:
-            raise InsufficientGpuMemory(
-                f"cannot {context} model {spec.name!r}: needs {needed:.1f} GiB "
-                f"({spec.required_vram_gib:.1f} required + {margin:.1f} safety margin), "
-                f"only {free:.1f} GiB free on device {self.gpu.device}"
-            )
+    async def _check_memory(self, spec: ModelSpec, context: str) -> None:
+        """Gate on VRAM (when NVML is available) and/or system RAM.
+
+        - ``required_vram_gib > 0`` → checked only if NVML works; on CPU/NPU
+          machines (no NVIDIA driver) it is skipped with a warning.
+        - ``required_ram_gib > 0`` → checked via psutil (cross-platform).
+
+        Never hard-start into an OOM: refuse BEFORE launching.
+        """
+
+        margin = self.cfg.memory.safety_margin_gib
+        problems: list[str] = []
+
+        if spec.required_vram_gib > 0:
+            if self.memory.nvml_available:
+                free = self.memory.vram_free_gib()
+                needed = spec.required_vram_gib + margin
+                if free < needed:
+                    problems.append(
+                        f"VRAM needs {needed:.1f} GiB ({spec.required_vram_gib:.1f} "
+                        f"required + {margin:.1f} margin), only {free:.1f} GiB free "
+                        f"on device {self.memory.device}"
+                    )
+            else:
+                logger.warning(
+                    "model %s requires VRAM but NVML is unavailable; VRAM gate skipped",
+                    spec.name,
+                )
+
+        if spec.required_ram_gib > 0:
+            free = self.memory.ram_available_gib()
+            needed = spec.required_ram_gib + margin
+            if free < needed:
+                problems.append(
+                    f"RAM needs {needed:.1f} GiB ({spec.required_ram_gib:.1f} "
+                    f"required + {margin:.1f} margin), only {free:.1f} GiB available"
+                )
+
+        if problems:
+            raise InsufficientMemory(f"cannot {context} model {spec.name!r}: " + "; ".join(problems))
 
     async def _start(self, spec: ModelSpec) -> None:
         """STOPPED -> STARTING -> RUNNING(spec), or back to STOPPED on failure."""
@@ -201,40 +231,40 @@ class ModelManager:
 
         try:
             # VRAM is checked BEFORE launching: never hard-start into a CUDA OOM.
-            await self._check_vram(spec, context="start")
+            await self._check_memory(spec, context="start")
             if self._cancel_requested:
-                raise SglangUnavailable("start cancelled by stop request")
+                raise BackendUnavailable("start cancelled by stop request")
             await self.runner.start(spec)
             if self._cancel_requested:
-                raise SglangUnavailable("start cancelled by stop request")
-            await self.runner.wait_health(self.cfg.sglang.startup_timeout_seconds)
+                raise BackendUnavailable("start cancelled by stop request")
+            await self.runner.wait_health(self.cfg.backend.startup_timeout_seconds)
             if self._cancel_requested:
-                raise SglangUnavailable("start cancelled by stop request")
-        except InsufficientGpuMemory as exc:
+                raise BackendUnavailable("start cancelled by stop request")
+        except InsufficientMemory as exc:
             logger.warning("start refused: %s", exc)
             self._fail_start(exc)
             raise
-        except GpuUnavailable as exc:
+        except MemoryUnavailable as exc:
             logger.error("start refused: %s", exc)
             self._fail_start(exc)
             raise
-        except SglangUnavailable as exc:
+        except BackendUnavailable as exc:
             logger.info("start aborted: %s", exc)
             await self._cleanup_after_failed_start()
             self._fail_start(exc)
             raise
-        except SglangStartupTimeout as exc:
+        except BackendStartupTimeout as exc:
             logger.error("startup timed out: %s", exc)
             await self._cleanup_after_failed_start()
             self._fail_start(exc)
             raise
         except Exception as exc:  # process died, spawn error, ...
-            if isinstance(exc, SglangStartupFailed):
+            if isinstance(exc, BackendStartupFailed):
                 logger.error("startup failed: %s", exc)
             else:
                 logger.exception("startup failed unexpectedly")
             await self._cleanup_after_failed_start()
-            mapped = exc if isinstance(exc, SglangStartupFailed) else SglangStartupFailed(str(exc))
+            mapped = exc if isinstance(exc, BackendStartupFailed) else BackendStartupFailed(str(exc))
             self._fail_start(mapped)
             raise mapped
         except BaseException as exc:  # CancelledError: client disconnected mid-start
@@ -243,7 +273,7 @@ class ModelManager:
                 await self._cleanup_after_failed_start()
             except BaseException:
                 pass
-            self._fail_start(SglangUnavailable("start cancelled before completion"))
+            self._fail_start(BackendUnavailable("start cancelled before completion"))
             raise
 
         self.state = State.RUNNING
@@ -259,16 +289,16 @@ class ModelManager:
 
     async def _cleanup_after_failed_start(self) -> None:
         try:
-            await self.runner.stop(self.cfg.sglang.stop_timeout_seconds)
+            await self.runner.stop(self.cfg.backend.stop_timeout_seconds)
         except Exception:  # noqa: BLE001 - best effort; original error matters more
-            logger.exception("failed to clean up SGLang after startup failure")
+            logger.exception("failed to clean up the backend after startup failure")
 
     async def _switch(self, spec: ModelSpec) -> None:
         """RUNNING(from) -> SWITCHING -> RUNNING(to), or STOPPED on failure.
 
         Decision is made on the VRAM re-read *after* the old model has been
         stopped and the memory has actually come back: the pre-stop free VRAM
-        is meaningless because the old SGLang is still holding it.
+        is meaningless because the old backend is still holding it.
         """
 
         async with self._transition_lock:
@@ -288,32 +318,32 @@ class ModelManager:
         from_model = self._switch_from
         try:
             logger.info("switching %s -> %s", from_model, spec.name)
-            await self.runner.stop(self.cfg.sglang.stop_timeout_seconds)
+            await self.runner.stop(self.cfg.backend.stop_timeout_seconds)
             # Wait for VRAM to genuinely come back before re-measuring.
-            await self.gpu.wait_vram_released(
-                self.cfg.gpu.vram_release_timeout_seconds,
-                self.cfg.gpu.vram_poll_interval_seconds,
+            await self.memory.wait_vram_released(
+                self.cfg.memory.release_timeout_seconds,
+                self.cfg.memory.poll_interval_seconds,
             )
             if self._cancel_requested:
-                raise SglangUnavailable("switch cancelled by stop request")
-            await self._check_vram(spec, context="switch to")
+                raise BackendUnavailable("switch cancelled by stop request")
+            await self._check_memory(spec, context="switch to")
             if self._cancel_requested:
-                raise SglangUnavailable("switch cancelled by stop request")
+                raise BackendUnavailable("switch cancelled by stop request")
             await self.runner.start(spec)
             if self._cancel_requested:
-                raise SglangUnavailable("switch cancelled by stop request")
-            await self.runner.wait_health(self.cfg.sglang.startup_timeout_seconds)
+                raise BackendUnavailable("switch cancelled by stop request")
+            await self.runner.wait_health(self.cfg.backend.startup_timeout_seconds)
             if self._cancel_requested:
-                raise SglangUnavailable("switch cancelled by stop request")
-        except InsufficientGpuMemory as exc:
+                raise BackendUnavailable("switch cancelled by stop request")
+        except InsufficientMemory as exc:
             logger.warning("switch refused after unloading %s: %s", from_model, exc)
             self._fail_switch(exc)
             raise
-        except GpuUnavailable as exc:
+        except MemoryUnavailable as exc:
             logger.error("switch aborted: %s", exc)
             self._fail_switch(exc)
             raise
-        except SglangUnavailable as exc:
+        except BackendUnavailable as exc:
             logger.info("switch aborted: %s", exc)
             await self._cleanup_after_failed_start()
             self._fail_switch(exc)
@@ -322,8 +352,8 @@ class ModelManager:
             logger.exception("switch %s -> %s failed", from_model, spec.name)
             mapped = (
                 exc
-                if isinstance(exc, (SglangStartupFailed, SglangStartupTimeout))
-                else SglangStartupFailed(str(exc))
+                if isinstance(exc, (BackendStartupFailed, BackendStartupTimeout))
+                else BackendStartupFailed(str(exc))
             )
             self._fail_switch(mapped)
             raise mapped
@@ -333,7 +363,7 @@ class ModelManager:
                 await self._cleanup_after_failed_start()
             except BaseException:
                 pass
-            self._fail_switch(SglangUnavailable("switch cancelled before completion"))
+            self._fail_switch(BackendUnavailable("switch cancelled before completion"))
             raise
 
         self.state = State.RUNNING
@@ -357,7 +387,7 @@ class ModelManager:
             fut.set_exception(exc)
 
     async def stop(self, reason: str = "manual", force: bool = False) -> None:
-        """Admin stop: unload SGLang and release VRAM.
+        """Admin stop: unload the backend and release memory.
 
         Normal stop (``force=False``) is accepted whenever the system is
         idle (``active_requests == 0``), in any state: a RUNNING model is
@@ -382,20 +412,20 @@ class ModelManager:
                 return  # an earlier stop is already tearing down (idempotent)
             if self.state is State.STARTING:
                 logger.info("stop cancels in-flight start of %s", self._starting_model)
-                self._cancel_transition(SglangUnavailable("start cancelled by stop request"))
+                self._cancel_transition(BackendUnavailable("start cancelled by stop request"))
             elif self.state is State.SWITCHING:
                 logger.info(
                     "stop cancels in-flight switch %s -> %s",
                     self._switch_from, self._switch_to,
                 )
-                self._cancel_transition(SglangUnavailable("switch cancelled by stop request"))
+                self._cancel_transition(BackendUnavailable("switch cancelled by stop request"))
             self.state = State.STOPPING
         await self._do_stop(reason)
 
     def _cancel_transition(self, exc: Exception) -> None:
         """Fail the in-flight transition futures and flag cancellation so
         ``_start``/``_switch`` abort at their next safe point — no new
-        SGLang process may be spawned after the stop decision."""
+        backend process may be spawned after the stop decision."""
 
         self._cancel_requested = True
         for fut in (self._start_future, self._switch_future):
@@ -407,16 +437,16 @@ class ModelManager:
 
     async def _do_stop(self, reason: str) -> None:
         try:
-            await self.runner.stop(self.cfg.sglang.stop_timeout_seconds)
-            await self.gpu.wait_vram_released(
-                self.cfg.gpu.vram_release_timeout_seconds,
-                self.cfg.gpu.vram_poll_interval_seconds,
+            await self.runner.stop(self.cfg.backend.stop_timeout_seconds)
+            await self.memory.wait_vram_released(
+                self.cfg.memory.release_timeout_seconds,
+                self.cfg.memory.poll_interval_seconds,
             )
         except Exception:  # noqa: BLE001 - stopping must always land in STOPPED
-            logger.exception("stop failed while tearing down SGLang")
+            logger.exception("stop failed while tearing down the backend")
         finally:
             self._force_stopped()
-            logger.info("SGLang stopped: %s", reason)
+            logger.info("backend stopped: %s", reason)
 
     # ------------------------------------------------------------ watchdog
 
@@ -434,12 +464,12 @@ class ModelManager:
                     except ModelSwitchBusy:
                         pass  # a request or transition won the race; fine
 
-    async def _on_sglang_exit(self, exit_code: int | None) -> None:
-        """The SGLang subprocess died on its own. Only act if we were RUNNING —
+    async def _on_backend_exit(self, exit_code: int | None) -> None:
+        """The backend subprocess died on its own. Only act if we were RUNNING —
         intentional stops happen under STOPPING/SWITCHING and must be ignored."""
 
         if self.state is State.RUNNING:
-            logger.error("SGLang died unexpectedly (code=%s); forcing STOPPED", exit_code)
+            logger.error("backend died unexpectedly (code=%s); forcing STOPPED", exit_code)
             self._force_stopped()
 
     # ------------------------------------------------------------ lifecycle
@@ -449,7 +479,7 @@ class ModelManager:
             self._watchdog_task = asyncio.create_task(self._watchdog_loop(), name="idle-watchdog")
             logger.info(
                 "manager started: %d models, idle timeout %.0fs, safety margin %.1f GiB",
-                len(self.cfg.models), self.cfg.idle.timeout_seconds, self.cfg.gpu.safety_margin_gib,
+                len(self.cfg.models), self.cfg.idle.timeout_seconds, self.cfg.memory.safety_margin_gib,
             )
 
     async def shutdown(self) -> None:
@@ -459,7 +489,7 @@ class ModelManager:
         if self.state is not State.STOPPED:
             async with self._transition_lock:
                 if self.state in (State.STARTING, State.SWITCHING):
-                    self._cancel_transition(SglangUnavailable("manager shutdown"))
+                    self._cancel_transition(BackendUnavailable("manager shutdown"))
                 self.state = State.STOPPING
             await self._do_stop(reason="manager shutdown")
         await self.runner.aclose()
@@ -467,17 +497,29 @@ class ModelManager:
     # -------------------------------------------------------------- status
 
     def status(self) -> dict:
-        gpu_info: dict
-        try:
-            gpu_info = {
-                "available": True,
-                "device": self.gpu.device,
-                "total_gib": round(self.gpu.total_gib(), 2),
-                "free_gib": round(self.gpu.free_gib(), 2),
-                "used_gib": round(self.gpu.used_gib(), 2),
+        memory_info: dict
+        if self.memory.nvml_available:
+            memory_info = {
+                "nvml_available": True,
+                "device": self.memory.device,
+                "vram_total_gib": round(self.memory.vram_total_gib(), 2),
+                "vram_free_gib": round(self.memory.vram_free_gib(), 2),
+                "vram_used_gib": round(self.memory.vram_used_gib(), 2),
             }
-        except Exception:  # noqa: BLE001 - NVML may be absent; report it
-            gpu_info = {"available": False, "device": self.gpu.device, "error": "NVML unavailable"}
+        else:
+            memory_info = {
+                "nvml_available": False,
+                "device": self.memory.device,
+                "vram_total_gib": None,
+                "vram_free_gib": None,
+                "vram_used_gib": None,
+            }
+        try:
+            memory_info["ram_total_gib"] = round(self.memory.ram_total_gib(), 2)
+            memory_info["ram_available_gib"] = round(self.memory.ram_available_gib(), 2)
+        except Exception:  # noqa: BLE001 - psutil failure must not break status
+            memory_info["ram_total_gib"] = None
+            memory_info["ram_available_gib"] = None
 
         return {
             "state": self.state.value,
@@ -489,7 +531,7 @@ class ModelManager:
             "idle_seconds": round(self.idle_seconds, 1),
             "idle_timeout_seconds": self.cfg.idle.timeout_seconds,
             "uptime_seconds": round(self._now() - self.started_at, 1),
-            "gpu": gpu_info,
+            "memory": memory_info,
         }
 
     def models_status(self) -> list[dict]:
@@ -500,8 +542,8 @@ class ModelManager:
                     "name": name,
                     "path": spec.path,
                     "required_vram_gib": spec.required_vram_gib,
-                    "mem_fraction_static": spec.sglang.mem_fraction_static,
-                    "context_length": spec.sglang.context_length,
+                    "required_ram_gib": spec.required_ram_gib,
+                    "extra_args": spec.backend.extra_args,
                     "loaded": self.state is State.RUNNING and self.current_model == name,
                 }
             )

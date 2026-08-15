@@ -1,4 +1,4 @@
-"""CLI entry point: ``python -m sglang_manager --config config.yaml``."""
+"""CLI entry point: ``python -m llm_gateway --config config.yaml``."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ from .config import ConfigError, load_config
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="sglang-manager",
-        description="GPU-aware SGLang lifecycle manager (single GPU, single active model).",
+        prog="llm-gateway",
+        description="backend-agnostic LLM lifecycle gateway (single device, single active model).",
     )
     parser.add_argument(
         "--config",
         default=None,
-        help="path to the YAML config (default: $SGLANG_MANAGER_CONFIG or ./config.yaml)",
+        help="path to the YAML config (default: $LLM_GATEWAY_CONFIG or ./config.yaml)",
     )
     parser.add_argument("--host", default=None, help="listen host (overrides config)")
     parser.add_argument("--port", type=int, default=None, help="listen port (overrides config)")

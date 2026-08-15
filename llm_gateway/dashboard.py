@@ -9,7 +9,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>sglang-manager · 用量看板</title>
+<title>llm-gateway · 用量看板</title>
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --panel2:#1e222c; --fg:#e6e8ee; --muted:#8b93a3;
           --accent:#4f8cff; --ok:#3ecf8e; --warn:#ffb454; --err:#ff6b6b; --border:#262b36; }
@@ -49,7 +49,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>📊 sglang-manager 用量看板</h1>
+  <h1>📊 llm-gateway 用量看板</h1>
   <span class="chip" id="stateChip">…</span>
   <span class="spacer"></span>
   <select id="rangeSel">
@@ -103,7 +103,7 @@ async function authedFetch(url) {
   if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
   const r = await fetch(url, { headers });
   if (r.status === 401) {
-    const k = prompt('请输入 sglang-manager API key（取消则跳过）：');
+    const k = prompt('请输入 llm-gateway API key（取消则跳过）：');
     if (k === null) return r;
     apiKey = k.trim();
     sessionStorage.setItem('sgm_api_key', apiKey);

@@ -8,18 +8,18 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pytest_asyncio import fixture as async_fixture
 
-from sglang_manager.api import create_app
-from sglang_manager.errors import SglangStartupTimeout
-from sglang_manager.manager import ModelManager
-from sglang_manager.proxy import Proxy
+from llm_gateway.api import create_app
+from llm_gateway.errors import BackendStartupTimeout
+from llm_gateway.manager import ModelManager
+from llm_gateway.proxy import Proxy
 
-from .conftest import FakeGpu, FakeRunner, make_config
+from .conftest import FakeMemory, FakeRunner, make_config
 
 
 def test_forward_headers_strips_content_length():
     """A stale content-length must never reach the upstream after a body
     rewrite (real HTTP/1.1 would fail the request)."""
-    from sglang_manager.proxy import _forward_headers
+    from llm_gateway.proxy import _forward_headers
 
     out = _forward_headers(
         {
@@ -81,9 +81,9 @@ def make_upstream_app(sink: dict | None = None) -> FastAPI:
 
 
 @async_fixture
-async def stack(gpu, runner):
+async def stack(memory, runner):
     cfg = make_config()
-    manager = ModelManager(cfg, gpu=gpu, runner=runner)
+    manager = ModelManager(cfg, memory=memory, runner=runner)
     upstream = make_upstream_app()
     proxy = Proxy("http://127.0.0.1:30000")
     proxy._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream), timeout=None)
@@ -91,12 +91,12 @@ async def stack(gpu, runner):
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://manager") as client:
-            yield client, manager, runner, gpu
+            yield client, manager, runner, memory
 
 
 async def test_chat_completion_start_on_demand(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     resp = await client.post(
         "/v1/chat/completions",
         json={"model": "qwen", "messages": [{"role": "user", "content": "hi"}]},
@@ -112,8 +112,8 @@ async def test_chat_completion_start_on_demand(stack):
 
 
 async def test_second_request_routes_without_restart(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     assert runner.starts == ["qwen"]
@@ -150,30 +150,30 @@ async def test_non_json_body_400(stack):
 
 
 async def test_insufficient_vram_503(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 10
+    client, manager, runner, memory = stack
+    memory.free_g = 10
     resp = await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     assert resp.status_code == 503
     err = resp.json()["error"]
-    assert err["type"] == "insufficient_gpu_memory"
+    assert err["type"] == "insufficient_memory"
     assert "34.0 GiB" in err["message"]
     assert manager.state.value == "stopped"
     assert runner.starts == []
 
 
 async def test_startup_timeout_503(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     runner.health_mode = "timeout"
     resp = await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     assert resp.status_code == 503
-    assert resp.json()["error"]["type"] == "sglang_startup_timeout"
+    assert resp.json()["error"]["type"] == "backend_startup_timeout"
     assert manager.state.value == "stopped"
 
 
 async def test_switch_via_api(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     resp = await client.post("/v1/chat/completions", json={"model": "gemma", "messages": []})
     assert resp.status_code == 200
@@ -183,8 +183,8 @@ async def test_switch_via_api(stack):
 
 
 async def test_streaming_proxy(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     async with client.stream(
         "POST", "/v1/chat/completions",
         json={"model": "qwen", "messages": [], "stream": True},
@@ -202,7 +202,7 @@ async def test_stream_usage_injection():
     """The manager must inject stream_options.include_usage so the upstream
     sends the final usage frame (needed for token accounting)."""
     cfg = make_config()
-    manager = ModelManager(cfg, gpu=FakeGpu(), runner=FakeRunner())
+    manager = ModelManager(cfg, memory=FakeMemory(), runner=FakeRunner())
     sink: dict = {}
     upstream = make_upstream_app(sink)
     proxy = Proxy("http://127.0.0.1:30000")
@@ -220,8 +220,8 @@ async def test_stream_usage_injection():
 
 
 async def test_gateway_status(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     resp = await client.get("/gateway/status")
     data = resp.json()
@@ -229,8 +229,8 @@ async def test_gateway_status(stack):
     assert data["model"] == "qwen"
     assert data["active_requests"] == 0
     assert data["idle_timeout_seconds"] == 3600
-    assert data["gpu"]["free_gib"] == 40
-    assert data["gpu"]["total_gib"] == 48
+    assert data["memory"]["vram_free_gib"] == 40
+    assert data["memory"]["vram_total_gib"] == 48
 
 
 async def test_gateway_models(stack):
@@ -244,8 +244,8 @@ async def test_gateway_models(stack):
 
 
 async def test_gateway_stop_then_restart_on_demand(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     resp = await client.post("/gateway/stop")
     assert resp.status_code == 200
@@ -257,8 +257,8 @@ async def test_gateway_stop_then_restart_on_demand(stack):
 
 
 async def test_gateway_stop_refused_when_busy(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     manager.request_started()
     resp = await client.post("/gateway/stop")
@@ -269,8 +269,8 @@ async def test_gateway_stop_refused_when_busy(stack):
 
 
 async def test_gateway_force_stop_when_busy(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     manager.request_started()  # in-flight request
     resp = await client.post("/gateway/force-stop")
@@ -284,8 +284,8 @@ async def test_gateway_force_stop_when_busy(stack):
 async def test_gateway_stop_cancels_starting(stack):
     """Idle stop during a pending startup: accepted, startup aborted,
     the in-flight request fails cleanly."""
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     runner.health_delay = 0.3
     task = asyncio.create_task(
         client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
@@ -297,13 +297,13 @@ async def test_gateway_stop_cancels_starting(stack):
     assert resp.json()["state"] == "stopped"
     r = await task
     assert r.status_code == 503
-    assert r.json()["error"]["type"] == "sglang_unavailable"
+    assert r.json()["error"]["type"] == "backend_unavailable"
     assert manager.state.value == "stopped"
 
 
 async def test_gateway_preload(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     resp = await client.post("/gateway/preload/gemma")
     assert resp.status_code == 200
     assert resp.json()["model"] == "gemma"
@@ -314,8 +314,8 @@ async def test_gateway_preload(stack):
 
 async def test_other_v1_post_paths_forwarded(stack):
     """Any /v1/* POST is gated and forwarded transparently."""
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     resp = await client.post("/v1/completions", json={"model": "qwen", "prompt": "x"})
     assert resp.status_code == 200
     assert resp.json()["model"] == "qwen"
@@ -327,7 +327,7 @@ async def test_other_v1_post_paths_forwarded(stack):
 async def _auth_app(keys: list[str]):
     cfg = make_config()
     cfg.server.api_keys = keys
-    manager = ModelManager(cfg, gpu=FakeGpu(), runner=FakeRunner())
+    manager = ModelManager(cfg, memory=FakeMemory(), runner=FakeRunner())
     upstream = make_upstream_app()
     proxy = Proxy("http://127.0.0.1:30000")
     proxy._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream), timeout=None)

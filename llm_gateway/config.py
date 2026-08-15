@@ -1,0 +1,315 @@
+"""Configuration loading & validation for llm-gateway.
+
+All knobs live in a YAML file (default ``config.yaml``, override with
+``--config`` or the ``LLM_GATEWAY_CONFIG`` env var).  High-value settings can
+be overridden through environment variables (legacy ``SGLANG_MANAGER_*``
+names are still accepted as fallbacks):
+
+- ``LLM_GATEWAY_IDLE_TIMEOUT_SECONDS`` — idle auto-unload timeout (never
+  hardcoded; YAML default is 3600 s).
+- ``LLM_GATEWAY_PORT`` / ``LLM_GATEWAY_HOST`` — manager listen address.
+- ``LLM_GATEWAY_API_KEY`` — comma-separated Bearer API keys.
+- ``LLM_GATEWAY_CONFIG`` — config file path.
+
+The managed backend is backend-agnostic: ``backend.command_template`` is a
+shell-style template (placeholders ``{python} {model_path} {host} {port}
+{device} {model_name} {extra_args}``) so SGLang, vLLM, llama.cpp, OpenVINO or
+any other OpenAI-compatible server can be launched with one line.  The legacy
+section names ``sglang:`` / ``gpu:`` are still accepted as aliases for
+``backend:`` / ``memory:`` (deprecated, logged).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+# Backwards-compatible defaults: SGLang-style launch (reference backend).
+DEFAULT_COMMAND_TEMPLATE = (
+    "{python} -m sglang.launch_server --model-path {model_path} "
+    "--host {host} --port {port} --tp-size 1 {extra_args}"
+)
+
+
+class ConfigError(Exception):
+    """Raised when the configuration file is missing or invalid."""
+
+
+@dataclass
+class ModelBackendArgs:
+    """Per-model backend launch arguments (backend-agnostic)."""
+
+    extra_args: list[str] = field(default_factory=list)
+    # Extra environment variables, merged over the global ``backend.env``
+    # (e.g. ``SGLANG_USE_MODELSCOPE: "true"`` or an ``LD_PRELOAD``).
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ModelSpec:
+    """One entry of the model registry."""
+
+    name: str
+    path: str  # local directory or hub id (HF / ModelScope / ...)
+    # Memory gates. 0 (default) = that resource is not checked.
+    required_vram_gib: float = 0.0  # VRAM (checked only when NVML is available)
+    required_ram_gib: float = 0.0   # system RAM (psutil, cross-platform)
+    backend: ModelBackendArgs = field(default_factory=ModelBackendArgs)
+
+
+@dataclass
+class ServerConfig:
+    host: str = "0.0.0.0"
+    port: int = 8000
+    # Accepted API keys (``Authorization: Bearer <key>``). Empty = auth
+    # disabled (open access). Multiple keys allowed.
+    api_keys: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BackendConfig:
+    """The managed inference backend (SGLang / vLLM / llama.cpp / OpenVINO...).
+
+    It is expected to expose an OpenAI-compatible API on ``host:port`` and a
+    readiness endpoint at ``health_path``.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 30000
+    health_path: str = "/health"
+    startup_timeout_seconds: float = 180.0
+    stop_timeout_seconds: float = 60.0
+    # Launch template; see DEFAULT_COMMAND_TEMPLATE for placeholders.
+    command_template: str = DEFAULT_COMMAND_TEMPLATE
+    env: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+
+@dataclass
+class MemoryConfig:
+    """Resource gates. VRAM via NVML (when present), RAM via psutil."""
+
+    device: int = 0  # only meaningful for CUDA backends (CUDA_VISIBLE_DEVICES)
+    # Headroom added to required_vram_gib / required_ram_gib before allowing
+    # a start.
+    safety_margin_gib: float = 4.0
+    # How long to wait for VRAM to actually come back after stopping the
+    # backend (CUDA context teardown lags process exit).
+    release_timeout_seconds: float = 120.0
+    poll_interval_seconds: float = 1.0
+
+
+@dataclass
+class IdleConfig:
+    # Unload the model after this much time with zero active requests.
+    # CONFIGURABLE on purpose — never hardcode this.
+    timeout_seconds: float = 3600.0
+    check_interval_seconds: float = 15.0
+
+
+@dataclass
+class UsageConfig:
+    # Token usage recording (SQLite) + dashboard.
+    enabled: bool = True
+    db_path: str = "data/usage.db"  # ":memory:" is fine for tests
+
+
+@dataclass
+class Config:
+    server: ServerConfig = field(default_factory=ServerConfig)
+    backend: BackendConfig = field(default_factory=BackendConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
+    idle: IdleConfig = field(default_factory=IdleConfig)
+    usage: UsageConfig = field(default_factory=UsageConfig)
+    models: dict[str, ModelSpec] = field(default_factory=dict)
+
+    def get_model(self, name: str) -> ModelSpec | None:
+        return self.models.get(name)
+
+
+def _require_mapping(raw: Any, section: str, path: str) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: expected a mapping, got {type(raw).__name__}")
+    return raw
+
+
+def _parse_model_backend(raw: Any, name: str) -> ModelBackendArgs:
+    out = ModelBackendArgs()
+    if not raw:
+        return out
+    for key, value in _require_mapping(raw, "backend", f"models.{name}.backend").items():
+        if key == "extra_args":
+            if not isinstance(value, list) or not all(isinstance(a, str) for a in value):
+                raise ConfigError(f"models.{name}.backend.extra_args: expected a list of strings")
+            out.extra_args = list(value)
+        elif key == "env":
+            if not isinstance(value, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+            ):
+                raise ConfigError(f"models.{name}.backend.env: expected a mapping of strings to strings")
+            out.env = dict(value)
+        else:
+            raise ConfigError(f"models.{name}.backend: unknown key {key!r}")
+    return out
+
+
+def _parse_model(name: str, raw: Any) -> ModelSpec:
+    data = _require_mapping(raw, "model", f"models.{name}")
+    path = data.get("path")
+    if not isinstance(path, str) or not path:
+        raise ConfigError(f"models.{name}: missing required string field 'path'")
+    required_vram = float(data.get("required_vram_gib", 0.0))
+    if required_vram < 0:
+        raise ConfigError(f"models.{name}: required_vram_gib must be >= 0")
+    required_ram = float(data.get("required_ram_gib", 0.0))
+    if required_ram < 0:
+        raise ConfigError(f"models.{name}: required_ram_gib must be >= 0")
+
+    backend_raw = data.get("backend")
+    if backend_raw is None and "sglang" in data:  # legacy alias
+        logger.warning("models.%s: 'sglang:' is deprecated, use 'backend:'", name)
+        backend_raw = data["sglang"]
+    return ModelSpec(
+        name=name,
+        path=path,
+        required_vram_gib=required_vram,
+        required_ram_gib=required_ram,
+        backend=_parse_model_backend(backend_raw, name),
+    )
+
+
+def _env_float(name: str, legacy_name: str, default: float) -> float:
+    value = os.environ.get(name) or os.environ.get(legacy_name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        raise ConfigError(f"env {name}: not a number: {value!r}") from None
+
+
+def _env_int(name: str, legacy_name: str, default: int) -> int:
+    value = os.environ.get(name) or os.environ.get(legacy_name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        raise ConfigError(f"env {name}: not an integer: {value!r}") from None
+
+
+def load_config(path: str | Path | None = None) -> Config:
+    """Load and validate configuration from a YAML file (plus env overrides)."""
+    if path is None:
+        path = os.environ.get("LLM_GATEWAY_CONFIG") or os.environ.get("SGLANG_MANAGER_CONFIG", "config.yaml")
+    cfg_path = Path(path)
+    if not cfg_path.exists():
+        raise ConfigError(f"config file not found: {cfg_path} (set LLM_GATEWAY_CONFIG or pass --config)")
+
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"config file {cfg_path}: invalid YAML: {exc}") from None
+    if raw is None:
+        raw = {}
+
+    root = _require_mapping(raw, "config", "config")
+    cfg = Config()
+
+    server = _require_mapping(root.get("server"), "server", "server")
+    cfg.server.host = str(server.get("host", cfg.server.host))
+    cfg.server.port = int(server.get("port", cfg.server.port))
+    api_key_raw = server.get("api_key")
+    if api_key_raw is not None:
+        if isinstance(api_key_raw, str):
+            cfg.server.api_keys = [api_key_raw] if api_key_raw.strip() else []
+        elif isinstance(api_key_raw, list) and all(isinstance(k, str) and k.strip() for k in api_key_raw):
+            cfg.server.api_keys = list(api_key_raw)
+        else:
+            raise ConfigError("server.api_key: expected a string or a list of strings")
+
+    backend_raw = root.get("backend")
+    if backend_raw is None and "sglang" in root:  # legacy alias
+        logger.warning("'sglang:' section is deprecated, use 'backend:'")
+        backend_raw = root["sglang"]
+    be = _require_mapping(backend_raw, "backend", "backend")
+    cfg.backend.host = str(be.get("host", cfg.backend.host))
+    cfg.backend.port = int(be.get("port", cfg.backend.port))
+    cfg.backend.health_path = str(be.get("health_path", cfg.backend.health_path))
+    cfg.backend.startup_timeout_seconds = float(be.get("startup_timeout_seconds", cfg.backend.startup_timeout_seconds))
+    cfg.backend.stop_timeout_seconds = float(be.get("stop_timeout_seconds", cfg.backend.stop_timeout_seconds))
+    if "command_template" in be:
+        tpl = be["command_template"]
+        if not isinstance(tpl, str) or not tpl.strip():
+            raise ConfigError("backend.command_template: expected a non-empty string")
+        cfg.backend.command_template = tpl
+    if "command" in be:
+        raise ConfigError(
+            "backend.command (list) is no longer supported; use "
+            "backend.command_template with placeholders {model_path} {host} {port} {extra_args} ..."
+        )
+    if "env" in be:
+        env = be["env"]
+        if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+            raise ConfigError("backend.env: expected a mapping of strings to strings")
+        cfg.backend.env = dict(env)
+
+    memory_raw = root.get("memory")
+    if memory_raw is None and "gpu" in root:  # legacy alias
+        logger.warning("'gpu:' section is deprecated, use 'memory:'")
+        memory_raw = root["gpu"]
+    mem = _require_mapping(memory_raw, "memory", "memory")
+    cfg.memory.device = int(mem.get("device", cfg.memory.device))
+    cfg.memory.safety_margin_gib = float(mem.get("safety_margin_gib", cfg.memory.safety_margin_gib))
+    cfg.memory.release_timeout_seconds = float(
+        mem.get("release_timeout_seconds",
+                mem.get("vram_release_timeout_seconds", cfg.memory.release_timeout_seconds))
+    )
+    cfg.memory.poll_interval_seconds = float(
+        mem.get("poll_interval_seconds",
+                mem.get("vram_poll_interval_seconds", cfg.memory.poll_interval_seconds))
+    )
+
+    idle = _require_mapping(root.get("idle"), "idle", "idle")
+    cfg.idle.timeout_seconds = float(idle.get("timeout_seconds", cfg.idle.timeout_seconds))
+    cfg.idle.check_interval_seconds = float(idle.get("check_interval_seconds", cfg.idle.check_interval_seconds))
+
+    usage = _require_mapping(root.get("usage"), "usage", "usage")
+    cfg.usage.enabled = bool(usage.get("enabled", cfg.usage.enabled))
+    cfg.usage.db_path = str(usage.get("db_path", cfg.usage.db_path))
+
+    models_raw = _require_mapping(root.get("models"), "models", "models")
+    if not models_raw:
+        raise ConfigError("models: at least one model is required")
+    for name, model_raw in models_raw.items():
+        cfg.models[name] = _parse_model(str(name), model_raw)
+
+    # Environment overrides win over the YAML file (legacy names fall back).
+    cfg.idle.timeout_seconds = _env_float(
+        "LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS", cfg.idle.timeout_seconds
+    )
+    cfg.server.port = _env_int("LLM_GATEWAY_PORT", "SGLANG_MANAGER_PORT", cfg.server.port)
+    cfg.server.host = os.environ.get("LLM_GATEWAY_HOST") or os.environ.get("SGLANG_MANAGER_HOST", cfg.server.host)
+    env_api_key = os.environ.get("LLM_GATEWAY_API_KEY") or os.environ.get("SGLANG_MANAGER_API_KEY")
+    if env_api_key:
+        cfg.server.api_keys = [k.strip() for k in env_api_key.split(",") if k.strip()]
+
+    if cfg.idle.timeout_seconds <= 0:
+        raise ConfigError("idle.timeout_seconds must be > 0")
+    if cfg.memory.safety_margin_gib < 0:
+        raise ConfigError("memory.safety_margin_gib must be >= 0")
+    if cfg.backend.startup_timeout_seconds <= 0:
+        raise ConfigError("backend.startup_timeout_seconds must be > 0")
+    return cfg

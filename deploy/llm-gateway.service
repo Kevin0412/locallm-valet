@@ -1,0 +1,17 @@
+[Unit]
+Description=llm-gateway: backend-agnostic LLM lifecycle gateway
+After=network.target
+
+[Service]
+Type=simple
+User=test
+WorkingDirectory=/home/test/sglang-manager
+# 网关常驻；推理后端由网关按需拉起，不需要单独的服务单元
+ExecStart=/home/test/sglang-manager/.venv/bin/python -m llm_gateway --config /home/test/sglang-manager/config.yaml
+Restart=always
+RestartSec=5
+# 可选：用环境变量覆盖配置里的空闲超时（不硬编码）
+# Environment=LLM_GATEWAY_IDLE_TIMEOUT_SECONDS=1800
+
+[Install]
+WantedBy=multi-user.target

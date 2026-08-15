@@ -1,4 +1,4 @@
-"""Typed error hierarchy for sglang-manager.
+"""Typed error hierarchy for llm-gateway.
 
 Every failure surfaced to the client is a :class:`ManagerError` subclass with a
 stable ``error_type`` string, rendered in the OpenAI-style shape::
@@ -28,11 +28,11 @@ class ModelNotFound(ManagerError):
     error_type = "model_not_found"
 
 
-class InsufficientGpuMemory(ManagerError):
+class InsufficientMemory(ManagerError):
     """Free VRAM (after any stop + release wait) is below required + margin."""
 
     http_status = 503
-    error_type = "insufficient_gpu_memory"
+    error_type = "insufficient_memory"
 
 
 class ModelSwitchBusy(ManagerError):
@@ -42,32 +42,32 @@ class ModelSwitchBusy(ManagerError):
     error_type = "model_switch_busy"
 
 
-class SglangUnavailable(ManagerError):
-    """SGLang is not reachable (stopping, dead, or connection refused)."""
+class BackendUnavailable(ManagerError):
+    """The backend is not reachable (stopping, dead, or connection refused)."""
 
     http_status = 503
-    error_type = "sglang_unavailable"
+    error_type = "backend_unavailable"
 
 
-class SglangStartupFailed(ManagerError):
-    """SGLang process died before becoming healthy."""
-
-    http_status = 503
-    error_type = "sglang_startup_failed"
-
-
-class SglangStartupTimeout(ManagerError):
-    """SGLang did not become healthy within startup_timeout_seconds."""
+class BackendStartupFailed(ManagerError):
+    """The backend process died before becoming healthy."""
 
     http_status = 503
-    error_type = "sglang_startup_timeout"
+    error_type = "backend_startup_failed"
 
 
-class GpuUnavailable(ManagerError):
+class BackendStartupTimeout(ManagerError):
+    """The backend did not become healthy within startup_timeout_seconds."""
+
+    http_status = 503
+    error_type = "backend_startup_timeout"
+
+
+class MemoryUnavailable(ManagerError):
     """NVML could not be initialized; VRAM cannot be inspected."""
 
     http_status = 503
-    error_type = "gpu_unavailable"
+    error_type = "memory_unavailable"
 
 
 class InvalidRequest(ManagerError):

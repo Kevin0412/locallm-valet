@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sglang-manager"
-version = "0.3.0"
-description = "GPU-aware SGLang lifecycle manager for a single GPU: on-demand model start/switch via the OpenAI API `model` field, idle auto-unload, fixed client-facing endpoint."
+name = "llm-gateway"
+version = "0.4.0"
+description = "Backend-agnostic LLM lifecycle gateway: on-demand start/switch of a single inference backend (SGLang / vLLM / llama.cpp / OpenVINO ...) via the OpenAI API `model` field, VRAM+RAM gating, idle auto-unload, fixed client-facing endpoint."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -14,6 +14,7 @@ dependencies = [
     "uvicorn>=0.29",
     "httpx>=0.27",
     "PyYAML>=6.0",
+    "psutil>=5.9",
     "nvidia-ml-py>=11.5",
 ]
 
@@ -24,10 +25,10 @@ dev = [
 ]
 
 [project.scripts]
-sglang-manager = "sglang_manager.__main__:main"
+llm-gateway = "llm_gateway.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["sglang_manager*"]
+include = ["llm_gateway*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

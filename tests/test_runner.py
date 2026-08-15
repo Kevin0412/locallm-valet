@@ -1,19 +1,17 @@
-"""Launch command & process env construction tests."""
+"""Launch command template & process env construction tests."""
 
 import sys
 
-from sglang_manager.config import ModelSglangArgs, ModelSpec, SglangConfig
-from sglang_manager.runner import build_launch_command, build_process_env
+from llm_gateway.config import ModelBackendArgs, ModelSpec, BackendConfig
+from llm_gateway.runner import build_backend_command, build_process_env
 
 
 def make_spec(**kwargs) -> ModelSpec:
+    kwargs.setdefault("path", "/models/qwen")
     return ModelSpec(
         name="qwen",
-        path="/models/qwen",
         required_vram_gib=30,
-        sglang=ModelSglangArgs(
-            mem_fraction_static=0.87,
-            context_length=262144,
+        backend=ModelBackendArgs(
             extra_args=["--kv-cache-dtype", "fp8_e4m3"],
             env={"SGLANG_USE_MODELSCOPE": "true"},
         ),
@@ -21,66 +19,78 @@ def make_spec(**kwargs) -> ModelSpec:
     )
 
 
-def flag_value(cmd, flag):
-    assert flag in cmd, f"{flag} missing in {cmd}"
-    return cmd[cmd.index(flag) + 1]
-
-
-def test_default_base_command():
-    cmd = build_launch_command(SglangConfig(), make_spec(), gpu_device=0)
-    assert cmd[:3] == [sys.executable, "-m", "sglang.launch_server"]
-    assert flag_value(cmd, "--model-path") == "/models/qwen"
-    assert flag_value(cmd, "--port") == "30000"
-    assert flag_value(cmd, "--host") == "127.0.0.1"
-    assert flag_value(cmd, "--tp-size") == "1"
-    assert flag_value(cmd, "--mem-fraction-static") == "0.87"
-    assert flag_value(cmd, "--context-length") == "262144"
-    assert "--kv-cache-dtype" in cmd
-
-
-def test_custom_base_command():
-    cfg = SglangConfig(command=["/opt/conda/envs/qwen3.5/bin/python", "-m", "sglang.launch_server"])
-    cmd = build_launch_command(cfg, make_spec(), gpu_device=0)
-    assert cmd[:3] == ["/opt/conda/envs/qwen3.5/bin/python", "-m", "sglang.launch_server"]
-
-
-def test_optional_args_omitted():
-    spec = make_spec()
-    spec.sglang = ModelSglangArgs()
-    cmd = build_launch_command(SglangConfig(), spec, gpu_device=1)
-    assert "--mem-fraction-static" not in cmd
-    assert "--context-length" not in cmd
-
-
-def test_model_extra_args_appended():
-    cmd = build_launch_command(SglangConfig(), make_spec(), gpu_device=0)
+def test_default_sglang_template():
+    cmd = build_backend_command(BackendConfig(), make_spec(), device=0)
+    assert cmd[0] == sys.executable
+    assert cmd[1:3] == ["-m", "sglang.launch_server"]
+    assert cmd[cmd.index("--model-path") + 1] == "/models/qwen"
+    assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
+    assert cmd[cmd.index("--port") + 1] == "30000"
+    assert cmd[cmd.index("--tp-size") + 1] == "1"
     assert cmd[-2:] == ["--kv-cache-dtype", "fp8_e4m3"]
+
+
+def test_llama_cpp_template():
+    """llama.cpp uses -m / --ctx-size; a custom template must win wholesale."""
+    cfg = BackendConfig(command_template="llama-server -m {model_path} --host {host} --port {port} {extra_args}")
+    cmd = build_backend_command(cfg, make_spec(), device=0)
+    assert cmd[0] == "llama-server"
+    assert cmd[cmd.index("-m") + 1] == "/models/qwen"
+    assert "--tp-size" not in cmd  # no SGLang-specific flags leaked
+    assert cmd[-2:] == ["--kv-cache-dtype", "fp8_e4m3"]
+
+
+def test_vllm_template():
+    cfg = BackendConfig(command_template="{python} -m vllm.entrypoints.openai.api_server --model {model_path} --port {port} {extra_args}")
+    cmd = build_backend_command(cfg, make_spec(), device=0)
+    assert cmd[0] == sys.executable
+    assert cmd[cmd.index("--model") + 1] == "/models/qwen"
+
+
+def test_template_without_extra_args_placeholder_appends():
+    cfg = BackendConfig(command_template="my-server --model {model_path} --port {port}")
+    cmd = build_backend_command(cfg, make_spec(), device=0)
+    assert cmd[-2:] == ["--kv-cache-dtype", "fp8_e4m3"]  # appended at the end
+
+
+def test_device_placeholder():
+    cfg = BackendConfig(command_template="my-server --model {model_path} --device {device}")
+    cmd = build_backend_command(cfg, make_spec(), device=3)
+    assert cmd[cmd.index("--device") + 1] == "3"
+
+
+def test_quoted_paths_with_spaces():
+    spec = make_spec(path="/models/My Qwen Model")
+    spec.backend.extra_args = []  # template has no {extra_args}; keep it clean
+    cfg = BackendConfig(command_template="my-server -m {model_path}")
+    cmd = build_backend_command(cfg, spec, device=0)
+    assert cmd == ["my-server", "-m", "/models/My Qwen Model"]
 
 
 # ------------------------------------------------------------ process env
 
 def test_manager_pythonpath_does_not_leak():
-    """The manager's PYTHONPATH must not reach the SGLang child — the child
+    """The manager's PYTHONPATH must not reach the backend child — the child
     uses its own interpreter's site-packages."""
-    base = {"PATH": "/usr/bin", "PYTHONPATH": "/home/test/sglang-manager/.deps:/home/test/sglang-manager"}
-    env = build_process_env(SglangConfig(), make_spec(), gpu_device=3, base_env=base)
+    base = {"PATH": "/usr/bin", "PYTHONPATH": "/home/test/llm-gateway/.deps:/home/test/llm-gateway"}
+    env = build_process_env(BackendConfig(), make_spec(), device=3, base_env=base)
     assert "PYTHONPATH" not in env
     assert env["CUDA_VISIBLE_DEVICES"] == "3"
     assert env["PATH"] == "/usr/bin"
 
 
 def test_pythonpath_passthrough_when_configured():
-    cfg = SglangConfig(env={"PYTHONPATH": "/opt/custom"})
+    cfg = BackendConfig(env={"PYTHONPATH": "/opt/custom"})
     spec = make_spec()
-    env = build_process_env(cfg, spec, gpu_device=0, base_env={"PYTHONPATH": "/leaked"})
+    env = build_process_env(cfg, spec, device=0, base_env={"PYTHONPATH": "/leaked"})
     assert env["PYTHONPATH"] == "/opt/custom"
 
 
 def test_model_env_overrides_global_env():
-    cfg = SglangConfig(env={"SGLANG_USE_MODELSCOPE": "true", "A": "global"})
-    spec = make_spec()  # spec.sglang.env = {"SGLANG_USE_MODELSCOPE": "true"}
-    spec.sglang.env = {"A": "model", "LD_PRELOAD": "/lib/libstdc++.so.6"}
-    env = build_process_env(cfg, spec, gpu_device=0, base_env={})
+    cfg = BackendConfig(env={"SGLANG_USE_MODELSCOPE": "true", "A": "global"})
+    spec = make_spec()
+    spec.backend.env = {"A": "model", "LD_PRELOAD": "/lib/libstdc++.so.6"}
+    env = build_process_env(cfg, spec, device=0, base_env={})
     assert env["A"] == "model"
     assert env["LD_PRELOAD"] == "/lib/libstdc++.so.6"
     assert env["SGLANG_USE_MODELSCOPE"] == "true"

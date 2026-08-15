@@ -1,12 +1,12 @@
 """FastAPI application: OpenAI-compatible proxy + gateway management API.
 
-Client-facing surface (fixed, independent of what SGLang does):
+Client-facing surface (fixed, independent of the backend):
 
 - ``POST /v1/chat/completions``, ``POST /v1/completions``, ``POST
   /v1/responses``, ... — any ``/v1/*`` POST is gated on its ``model`` field
-  and forwarded verbatim to SGLang (including SSE streaming).
+  and forwarded verbatim to the backend (including SSE streaming).
 - ``GET /v1/models`` — the configured registry, so OpenAI clients can list
-  models even while SGLang is stopped.
+  models even while the backend is stopped.
 - ``GET /gateway/status``, ``GET /gateway/models``, ``POST /gateway/stop``,
   ``POST /gateway/preload/{model}`` — management surface.
 """
@@ -25,11 +25,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from . import __version__
 from .config import Config, ConfigError, load_config
 from .dashboard import DASHBOARD_HTML
-from .errors import InvalidRequest, ManagerError, SglangUnavailable
-from .gpu import GpuMonitor
+from .errors import InvalidRequest, ManagerError, BackendUnavailable
+from .memory import MemoryMonitor
 from .manager import ModelManager
 from .proxy import Proxy
-from .runner import SglangRunner
+from .runner import BackendRunner
 from .state import State
 from .usage import UsageRecorder, extract_usage_from_json
 
@@ -37,11 +37,11 @@ logger = logging.getLogger(__name__)
 
 
 def build_manager(config: Config) -> ModelManager:
-    """Wire the real GPU monitor + SGLang runner into a manager."""
+    """Wire the real memory monitor + backend runner into a manager."""
 
-    gpu = GpuMonitor(config.gpu.device)
-    runner = SglangRunner(config.sglang, gpu_device=config.gpu.device)
-    return ModelManager(config, gpu, runner)
+    memory = MemoryMonitor(config.memory.device)
+    runner = BackendRunner(config.backend, device=config.memory.device)
+    return ModelManager(config, memory, runner)
 
 
 def create_app(
@@ -56,7 +56,7 @@ def create_app(
     if config is None:
         config = load_config()
     manager = manager or build_manager(config)
-    proxy = proxy or Proxy(config.sglang.base_url)
+    proxy = proxy or Proxy(config.backend.base_url)
     recorder = recorder or (UsageRecorder(config.usage.db_path) if config.usage.enabled else None)
 
     @asynccontextmanager
@@ -70,7 +70,7 @@ def create_app(
             if recorder is not None:
                 recorder.close()
 
-    app = FastAPI(title="sglang-manager", version=__version__, lifespan=lifespan)
+    app = FastAPI(title="llm-gateway", version=__version__, lifespan=lifespan)
 
     if config.server.api_keys:
         _AUTH_EXEMPT_PREFIXES = ("/docs", "/redoc", "/openapi.json")
@@ -118,7 +118,7 @@ def create_app(
         started = time.monotonic()
         is_stream = bool(payload.get("stream"))
         if is_stream:
-            # SGLang only sends the final SSE usage frame when explicitly
+            # The backend only sends the final SSE usage frame when explicitly
             # requested; inject include_usage so our token accounting (and the
             # client, transparently) gets real numbers.
             opts = payload.get("stream_options")
@@ -168,7 +168,7 @@ def create_app(
         return {
             "object": "list",
             "data": [
-                {"id": name, "object": "model", "created": 0, "owned_by": "sglang-manager"}
+                {"id": name, "object": "model", "created": 0, "owned_by": "llm-gateway"}
                 for name in manager.cfg.models
             ],
         }
@@ -198,7 +198,7 @@ def create_app(
                     return resp
                 finally:
                     manager.request_finished()
-            raise SglangUnavailable("no model loaded; POST with a 'model' field to load one")
+            raise BackendUnavailable("no model loaded; POST with a 'model' field to load one")
 
         body = await request.body()
         try:
@@ -297,7 +297,7 @@ def _make_default_app() -> FastAPI | None:
         return None
 
 
-# For `uvicorn sglang_manager.api:app`; None until a config is available.
-# Prefer `python -m sglang_manager --config config.yaml` (or the
-# `sglang-manager` console script), which reports config errors clearly.
+# For `uvicorn llm_gateway.api:app`; None until a config is available.
+# Prefer `python -m llm_gateway --config config.yaml` (or the
+# `llm-gateway` console script), which reports config errors clearly.
 app = _make_default_app()

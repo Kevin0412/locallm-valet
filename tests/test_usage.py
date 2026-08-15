@@ -6,13 +6,13 @@ import pytest
 from fastapi import Request
 from pytest_asyncio import fixture as async_fixture
 
-from sglang_manager.api import create_app
-from sglang_manager.errors import InvalidRequest
-from sglang_manager.manager import ModelManager
-from sglang_manager.proxy import Proxy
-from sglang_manager.usage import SseUsageScanner, UsageRecorder, extract_usage_from_json
+from llm_gateway.api import create_app
+from llm_gateway.errors import InvalidRequest
+from llm_gateway.manager import ModelManager
+from llm_gateway.proxy import Proxy
+from llm_gateway.usage import SseUsageScanner, UsageRecorder, extract_usage_from_json
 
-from .conftest import FakeGpu, FakeRunner, make_config
+from .conftest import FakeMemory, FakeRunner, make_config
 from .test_api import make_upstream_app
 
 
@@ -107,9 +107,9 @@ def test_recorder_in_memory():
 # ------------------------------------------------------------- API integration
 
 @async_fixture
-async def stack(gpu, runner):
+async def stack(memory, runner):
     cfg = make_config()
-    manager = ModelManager(cfg, gpu=gpu, runner=runner)
+    manager = ModelManager(cfg, memory=memory, runner=runner)
     upstream = make_upstream_app()
     proxy = Proxy("http://127.0.0.1:30000")
     proxy._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream), timeout=None)
@@ -117,12 +117,12 @@ async def stack(gpu, runner):
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://manager") as client:
-            yield client, manager, runner, gpu
+            yield client, manager, runner, memory
 
 
 async def test_plain_request_recorded(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     data = (await client.get("/gateway/usage")).json()
     assert data["summary"]["requests"] == 1
@@ -138,8 +138,8 @@ async def test_plain_request_recorded(stack):
 
 
 async def test_stream_request_recorded(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     async with client.stream(
         "POST", "/v1/chat/completions",
         json={"model": "qwen", "messages": [], "stream": True},
@@ -156,8 +156,8 @@ async def test_stream_request_recorded(stack):
 
 
 async def test_usage_model_filter_and_grouping(stack):
-    client, manager, runner, gpu = stack
-    gpu.free_g = 40
+    client, manager, runner, memory = stack
+    memory.free_g = 40
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     await client.post("/v1/chat/completions", json={"model": "gemma", "messages": []})
     q = (await client.get("/gateway/usage", params={"model": "qwen"})).json()
@@ -188,7 +188,7 @@ async def test_dashboard_page(stack):
 async def test_usage_disabled_no_endpoints():
     cfg = make_config()
     cfg.usage.enabled = False
-    app = create_app(config=cfg, manager=ModelManager(cfg, gpu=FakeGpu(), runner=FakeRunner()))
+    app = create_app(config=cfg, manager=ModelManager(cfg, memory=FakeMemory(), runner=FakeRunner()))
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://manager") as client:
         assert (await client.get("/gateway/usage")).status_code == 404
