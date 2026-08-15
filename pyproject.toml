@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sglang-manager"
+version = "0.1.0"
+description = "GPU-aware SGLang lifecycle manager for a single GPU: on-demand model start/switch via the OpenAI API `model` field, idle auto-unload, fixed client-facing endpoint."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+    "PyYAML>=6.0",
+    "nvidia-ml-py>=11.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+sglang-manager = "sglang_manager.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["sglang_manager*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

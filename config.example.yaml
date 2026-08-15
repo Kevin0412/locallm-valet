@@ -1,0 +1,79 @@
+# sglang-manager 配置示例
+# 复制为 config.yaml 后按需修改。所有路径/数值都基于本机真实环境。
+
+server:
+  host: 0.0.0.0
+  port: 8000          # 客户端唯一入口（OpenAI-compatible）
+
+sglang:
+  # SGLang 监听在内部端口，只允许本机（manager）访问，客户端不直接连它
+  host: 127.0.0.1
+  port: 30000
+  health_path: /health        # 更严格的就绪检查可用 /health_generate
+  startup_timeout_seconds: 180
+  stop_timeout_seconds: 60
+
+  # 启动命令基底：指向装了 SGLang 的 conda 环境（qwen3.5）
+  # 相当于 launch_qwen_3.6.sh 里的 `python -m sglang.launch_server`
+  command:
+    - /home/test/anaconda3/envs/qwen3.5/bin/python
+    - -m
+    - sglang.launch_server
+
+  # 全局环境变量（会合并 CUDA_VISIBLE_DEVICES=<gpu.device>）
+  env:
+    SGLANG_USE_MODELSCOPE: "true"
+
+gpu:
+  device: 0
+  safety_margin_gib: 4.0      # 启动门槛 = required_vram_gib + 该余量
+  vram_release_timeout_seconds: 120
+  vram_poll_interval_seconds: 1.0
+
+# 空闲自动卸载（可配置！不硬编码）：
+#   state==RUNNING 且 active_requests==0 且 距上次请求结束 >= timeout_seconds → 停止 SGLang 释放显存
+# 也可用环境变量覆盖：SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS=1800
+idle:
+  timeout_seconds: 3600       # 1 小时无请求自动卸载
+  check_interval_seconds: 15
+
+models:
+  # 对应 launch_qwen_3.6.sh：
+  #   python -m sglang.launch_server --model-path Qwen/Qwen3.6-35B-A3B-FP8 --port 8000
+  #     --tp-size 1 --mem-fraction-static 0.87 --context-length 262144
+  #     --reasoning-parser qwen3 --tool-call-parser qwen3_coder --kv-cache-dtype fp8_e4m3
+  # 注意：mem-fraction-static 0.87 * 48G ≈ 42G，所以 required_vram_gib 要按实际占用填，
+  # 再加 safety_margin 后必须小于 GPU 总显存减去外部占用。
+  qwen3.6-35b:
+    path: Qwen/Qwen3.6-35B-A3B-FP8      # ModelScope ID（或本地目录）
+    required_vram_gib: 42
+    sglang:
+      mem_fraction_static: 0.87
+      context_length: 262144
+      extra_args:
+        - --reasoning-parser
+        - qwen3
+        - --tool-call-parser
+        - qwen3_coder
+        - --kv-cache-dtype
+        - fp8_e4m3
+
+  # 对应 launch_qwen_coder.sh（含 LD_PRELOAD）：
+  qwen3-coder-30b:
+    path: Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8
+    required_vram_gib: 43
+    sglang:
+      mem_fraction_static: 0.8832
+      extra_args:
+        - --kv-cache-dtype
+        - fp8_e4m3
+      env:
+        LD_PRELOAD: /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+
+  # 占位示例：本地模型目录 + 更保守的显存需求
+  gemma-2-9b:
+    path: /models/gemma-2-9b-it
+    required_vram_gib: 18
+    sglang:
+      mem_fraction_static: 0.80
+      context_length: 8192
