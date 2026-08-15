@@ -120,6 +120,21 @@ SGLang 启动 → health ready → 转发原请求。超时相关三个时间：
 
 ## API
 
+### API-key 认证
+
+配置 `server.api_key`（字符串或列表）或环境变量 `SGLANG_MANAGER_API_KEY`
+（逗号分隔多 key）后，**所有 `/v1/*` 与 `/gateway/*` 数据接口**都要求：
+
+```text
+Authorization: Bearer <key>
+```
+
+- 缺失/错误 → `401` `{"error": {"type": "authentication_error", "code": "invalid_api_key", ...}}`
+- OpenAI 客户端零改动：`OpenAI(base_url="...", api_key="sk-xxx")`
+- 免认证例外：`/docs`、`/redoc`、`/openapi.json`（仅 schema）、`/gateway/dashboard`
+  （纯静态壳）；看板页的数据请求在 401 时自动弹窗要 key（存 sessionStorage）
+- **未配置 key = 完全开放**（默认，适合本地）
+
 ### OpenAI 兼容（客户端入口）
 
 - `POST /v1/chat/completions`、`POST /v1/completions`、`POST /v1/responses`、`POST /v1/embeddings`……任意 `/v1/*` POST：按 body 里 `model` 字段门控后**原样转发**（含 `stream=true` SSE）。

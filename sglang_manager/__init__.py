@@ -6,4 +6,4 @@ start when VRAM is insufficient, and unloads the model after a configurable
 idle period.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

@@ -72,6 +72,38 @@ def create_app(
 
     app = FastAPI(title="sglang-manager", version=__version__, lifespan=lifespan)
 
+    if config.server.api_keys:
+        _AUTH_EXEMPT_PREFIXES = ("/docs", "/redoc", "/openapi.json")
+        _AUTH_EXEMPT_EXACT = ("/gateway/dashboard",)
+
+        @app.middleware("http")
+        async def _api_key_auth(request: Request, call_next):
+            """Bearer API-key gate for /v1/* and /gateway/* data endpoints.
+
+            The dashboard page itself is exempt (static shell, no data); its
+            JS prompts for the key and sends it on data fetches.  Docs pages
+            are exempt (schema only).  Everything else requires a valid key
+            when ``server.api_keys`` is configured.
+            """
+            path = request.url.path
+            if path.startswith(_AUTH_EXEMPT_PREFIXES) or path in _AUTH_EXEMPT_EXACT:
+                return await call_next(request)
+            auth = request.headers.get("authorization", "")
+            token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+            if not token or token not in config.server.api_keys:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "error": {
+                            "type": "authentication_error",
+                            "message": "invalid or missing API key (Authorization: Bearer <key>)",
+                            "code": "invalid_api_key",
+                        }
+                    },
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            return await call_next(request)
+
     @app.exception_handler(ManagerError)
     async def _manager_error_handler(request: Request, exc: ManagerError):
         return JSONResponse(status_code=exc.http_status, content={"error": exc.to_payload()})

@@ -96,13 +96,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 const $ = id => document.getElementById(id);
 let autoTimer = null;
+let apiKey = sessionStorage.getItem('sgm_api_key') || '';
+
+async function authedFetch(url) {
+  const headers = {};
+  if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+  const r = await fetch(url, { headers });
+  if (r.status === 401) {
+    const k = prompt('请输入 sglang-manager API key（取消则跳过）：');
+    if (k === null) return r;
+    apiKey = k.trim();
+    sessionStorage.setItem('sgm_api_key', apiKey);
+    return authedFetch(url);
+  }
+  return r;
+}
 
 function fmt(n) { return (n ?? 0).toLocaleString('zh-CN'); }
 function pct(a, b) { return b > 0 ? (100 * a / b).toFixed(1) + '%' : '0%'; }
 
 async function loadModels() {
   try {
-    const r = await fetch('/gateway/models');
+    const r = await authedFetch('/gateway/models');
     const data = await r.json();
     const sel = $('modelSel');
     for (const m of data.models) {
@@ -110,7 +125,7 @@ async function loadModels() {
       opt.value = m.name; opt.textContent = m.name;
       sel.appendChild(opt);
     }
-    const s = await (await fetch('/gateway/status')).json();
+    const s = await (await authedFetch('/gateway/status')).json();
     const chip = $('stateChip');
     chip.textContent = s.state === 'running'
       ? '🟢 ' + s.state + ' · ' + s.model
@@ -173,7 +188,7 @@ async function load() {
   q.set('group_by', $('groupSel').value);
   q.set('limit', '50');
   try {
-    const r = await fetch('/gateway/usage?' + q.toString());
+    const r = await authedFetch('/gateway/usage?' + q.toString());
     if (!r.ok) throw new Error('HTTP ' + r.status);
     render(await r.json());
     $('refreshAt').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');

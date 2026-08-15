@@ -75,3 +75,10 @@ class InvalidRequest(ManagerError):
 
     http_status = 400
     error_type = "invalid_request"
+
+
+class AuthenticationFailed(ManagerError):
+    """Missing or wrong API key."""
+
+    http_status = 401
+    error_type = "authentication_error"

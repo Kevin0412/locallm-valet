@@ -320,3 +320,73 @@ async def test_other_v1_post_paths_forwarded(stack):
     assert resp.status_code == 200
     assert resp.json()["model"] == "qwen"
     assert manager.current_model == "qwen"
+
+
+# ------------------------------------------------------------- api-key auth
+
+async def _auth_app(keys: list[str]):
+    cfg = make_config()
+    cfg.server.api_keys = keys
+    manager = ModelManager(cfg, gpu=FakeGpu(), runner=FakeRunner())
+    upstream = make_upstream_app()
+    proxy = Proxy("http://127.0.0.1:30000")
+    proxy._client = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream), timeout=None)
+    app = create_app(config=cfg, manager=manager, proxy=proxy)
+    return app
+
+
+async def test_api_key_required_when_configured():
+    app = await _auth_app(["sk-secret"])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        # missing key
+        r = await client.get("/v1/models")
+        assert r.status_code == 401
+        err = r.json()["error"]
+        assert err["type"] == "authentication_error"
+        assert err["code"] == "invalid_api_key"
+        # wrong key
+        r = await client.get("/v1/models", headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 401
+        # correct key
+        r = await client.get("/v1/models", headers={"Authorization": "Bearer sk-secret"})
+        assert r.status_code == 200
+        # gateway data endpoints protected too
+        assert (await client.get("/gateway/usage")).status_code == 401
+        assert (
+            await client.get("/gateway/usage", headers={"Authorization": "Bearer sk-secret"})
+        ).status_code == 200
+
+
+async def test_api_key_any_of_multiple():
+    app = await _auth_app(["sk-a", "sk-b"])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        assert (await client.get("/v1/models", headers={"Authorization": "Bearer sk-b"})).status_code == 200
+
+
+async def test_api_key_post_protected():
+    app = await _auth_app(["sk-secret"])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        r = await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
+        assert r.status_code == 401
+        r = await client.post(
+            "/v1/chat/completions",
+            json={"model": "qwen", "messages": []},
+            headers={"Authorization": "Bearer sk-secret"},
+        )
+        assert r.status_code == 200
+
+
+async def test_dashboard_page_exempt_from_auth():
+    """The dashboard shell stays reachable without a key; its data fetches
+    carry the key (handled client-side)."""
+    app = await _auth_app(["sk-secret"])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        r = await client.get("/gateway/dashboard")
+        assert r.status_code == 200
+        assert "authedFetch" in r.text
+
+
+async def test_no_key_configured_open_access(stack):
+    client, *_ = stack  # make_config has no api_keys
+    assert (await client.get("/v1/models")).status_code == 200
+    assert (await client.get("/gateway/status")).status_code == 200

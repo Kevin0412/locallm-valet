@@ -4,6 +4,10 @@
 server:
   host: 0.0.0.0
   port: 8000          # 客户端唯一入口（OpenAI-compatible）
+  # API-key 认证：设置后所有 /v1/* 与 /gateway/* 数据接口要求
+  # `Authorization: Bearer <key>`（401 否则）。支持多个 key 的列表。
+  # 未设置 = 不认证（本地全开）。也可用环境变量 SGLANG_MANAGER_API_KEY（逗号分隔多 key）。
+  # api_key: sk-your-key-here
 
 sglang:
   # SGLang 监听在内部端口，只允许本机（manager）访问，客户端不直接连它

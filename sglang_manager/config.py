@@ -49,6 +49,9 @@ class ModelSpec:
 class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8000
+    # Accepted API keys (``Authorization: Bearer <key>``). Empty = auth
+    # disabled (open access). Multiple keys allowed.
+    api_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -198,6 +201,14 @@ def load_config(path: str | Path | None = None) -> Config:
     server = _require_mapping(root.get("server"), "server", "server")
     cfg.server.host = str(server.get("host", cfg.server.host))
     cfg.server.port = int(server.get("port", cfg.server.port))
+    api_key_raw = server.get("api_key")
+    if api_key_raw is not None:
+        if isinstance(api_key_raw, str):
+            cfg.server.api_keys = [api_key_raw] if api_key_raw.strip() else []
+        elif isinstance(api_key_raw, list) and all(isinstance(k, str) and k.strip() for k in api_key_raw):
+            cfg.server.api_keys = list(api_key_raw)
+        else:
+            raise ConfigError("server.api_key: expected a string or a list of strings")
 
     sgl = _require_mapping(root.get("sglang"), "sglang", "sglang")
     cfg.sglang.host = str(sgl.get("host", cfg.sglang.host))
@@ -240,6 +251,9 @@ def load_config(path: str | Path | None = None) -> Config:
     cfg.idle.timeout_seconds = _env_float("SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS", cfg.idle.timeout_seconds)
     cfg.server.port = _env_int("SGLANG_MANAGER_PORT", cfg.server.port)
     cfg.server.host = os.environ.get("SGLANG_MANAGER_HOST", cfg.server.host)
+    env_api_key = os.environ.get("SGLANG_MANAGER_API_KEY")
+    if env_api_key:
+        cfg.server.api_keys = [k.strip() for k in env_api_key.split(",") if k.strip()]
 
     if cfg.idle.timeout_seconds <= 0:
         raise ConfigError("idle.timeout_seconds must be > 0")

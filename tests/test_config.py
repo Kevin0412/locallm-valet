@@ -87,3 +87,36 @@ def test_no_models(tmp_path):
 def test_invalid_yaml(tmp_path):
     with pytest.raises(ConfigError, match="invalid YAML"):
         load_config(write_sample(tmp_path, "models: [unclosed\n"))
+
+
+def test_api_key_string(tmp_path, monkeypatch):
+    monkeypatch.delenv("SGLANG_MANAGER_API_KEY", raising=False)
+    cfg = load_config(write_sample(tmp_path, SAMPLE.replace(
+        "server: {host: 0.0.0.0, port: 8123}",
+        "server: {host: 0.0.0.0, port: 8123, api_key: sk-test-123}",
+    )))
+    assert cfg.server.api_keys == ["sk-test-123"]
+
+
+def test_api_key_list(tmp_path, monkeypatch):
+    monkeypatch.delenv("SGLANG_MANAGER_API_KEY", raising=False)
+    cfg = load_config(write_sample(tmp_path, SAMPLE.replace(
+        "server: {host: 0.0.0.0, port: 8123}",
+        "server: {host: 0.0.0.0, port: 8123, api_key: [sk-a, sk-b]}",
+    )))
+    assert cfg.server.api_keys == ["sk-a", "sk-b"]
+
+
+def test_api_key_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("SGLANG_MANAGER_API_KEY", "sk-env-1, sk-env-2")
+    cfg = load_config(write_sample(tmp_path))
+    assert cfg.server.api_keys == ["sk-env-1", "sk-env-2"]
+
+
+def test_api_key_invalid_type(tmp_path, monkeypatch):
+    monkeypatch.delenv("SGLANG_MANAGER_API_KEY", raising=False)
+    with pytest.raises(ConfigError, match="api_key"):
+        load_config(write_sample(tmp_path, SAMPLE.replace(
+            "server: {host: 0.0.0.0, port: 8123}",
+            "server: {host: 0.0.0.0, port: 8123, api_key: 42}",
+        )))
