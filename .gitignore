@@ -6,5 +6,6 @@ venv/
 .deps/
 .pytest_cache/
 config.yaml
+data/
 logs/
 *.log

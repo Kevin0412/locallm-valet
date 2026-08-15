@@ -87,11 +87,19 @@ class IdleConfig:
 
 
 @dataclass
+class UsageConfig:
+    # Token usage recording (SQLite) + dashboard.
+    enabled: bool = True
+    db_path: str = "data/usage.db"  # ":memory:" is fine for tests
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     sglang: SglangConfig = field(default_factory=SglangConfig)
     gpu: GpuConfig = field(default_factory=GpuConfig)
     idle: IdleConfig = field(default_factory=IdleConfig)
+    usage: UsageConfig = field(default_factory=UsageConfig)
     models: dict[str, ModelSpec] = field(default_factory=dict)
 
     def get_model(self, name: str) -> ModelSpec | None:
@@ -217,6 +225,10 @@ def load_config(path: str | Path | None = None) -> Config:
     idle = _require_mapping(root.get("idle"), "idle", "idle")
     cfg.idle.timeout_seconds = float(idle.get("timeout_seconds", cfg.idle.timeout_seconds))
     cfg.idle.check_interval_seconds = float(idle.get("check_interval_seconds", cfg.idle.check_interval_seconds))
+
+    usage = _require_mapping(root.get("usage"), "usage", "usage")
+    cfg.usage.enabled = bool(usage.get("enabled", cfg.usage.enabled))
+    cfg.usage.db_path = str(usage.get("db_path", cfg.usage.db_path))
 
     models_raw = _require_mapping(root.get("models"), "models", "models")
     if not models_raw:

@@ -15,19 +15,23 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import __version__
 from .config import Config, ConfigError, load_config
+from .dashboard import DASHBOARD_HTML
 from .errors import InvalidRequest, ManagerError, SglangUnavailable
 from .gpu import GpuMonitor
 from .manager import ModelManager
 from .proxy import Proxy
 from .runner import SglangRunner
 from .state import State
+from .usage import UsageRecorder, extract_usage_from_json
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +48,16 @@ def create_app(
     config: Config | None = None,
     manager: ModelManager | None = None,
     proxy: Proxy | None = None,
+    recorder: UsageRecorder | None = None,
 ) -> FastAPI:
-    """App factory. ``manager``/``proxy`` can be injected (tests use fakes)."""
+    """App factory. ``manager``/``proxy``/``recorder`` can be injected (tests
+    use fakes / in-memory databases)."""
 
     if config is None:
         config = load_config()
     manager = manager or build_manager(config)
     proxy = proxy or Proxy(config.sglang.base_url)
+    recorder = recorder or (UsageRecorder(config.usage.db_path) if config.usage.enabled else None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -60,6 +67,8 @@ def create_app(
         finally:
             await manager.shutdown()
             await proxy.aclose()
+            if recorder is not None:
+                recorder.close()
 
     app = FastAPI(title="sglang-manager", version=__version__, lifespan=lifespan)
 
@@ -68,21 +77,45 @@ def create_app(
         return JSONResponse(status_code=exc.http_status, content={"error": exc.to_payload()})
 
     async def _route_with_gate(request: Request, body: bytes, payload: dict) -> object:
-        """Gate on ``model``, then forward; owns active-request accounting."""
+        """Gate on ``model``, then forward; owns active-request accounting
+        and usage recording."""
 
         model_name = payload.get("model")
         if not isinstance(model_name, str) or not model_name:
             raise InvalidRequest("missing or invalid 'model' field in request body")
+        started = time.monotonic()
+        is_stream = bool(payload.get("stream"))
+
+        def record_usage(usage: dict | None, status: int | None) -> None:
+            if recorder is None:
+                return
+            try:
+                recorder.record(
+                    model=model_name,
+                    endpoint=request.url.path,
+                    stream=is_stream,
+                    status=status,
+                    prompt_tokens=(usage or {}).get("prompt_tokens", 0),
+                    completion_tokens=(usage or {}).get("completion_tokens", 0),
+                    duration_ms=(time.monotonic() - started) * 1000.0,
+                )
+            except Exception:  # noqa: BLE001 - recording never breaks proxying
+                logger.exception("usage recording failed for %s", model_name)
+
         await manager.ensure_loaded(model_name)
         manager.request_started()
-        if payload.get("stream"):
+        if is_stream:
             # proxy.stream owns the finish callback: it fires on send failure
             # or when the SSE stream is fully consumed / closed by the client.
             return await proxy.stream(
-                request.method, request.url.path, request.headers, body, manager.request_finished
+                request.method, request.url.path, request.headers, body,
+                on_finished=manager.request_finished,
+                on_usage=record_usage if recorder is not None else None,
             )
         try:
-            return await proxy.plain(request.method, request.url.path, request.headers, body)
+            resp = await proxy.plain(request.method, request.url.path, request.headers, body)
+            record_usage(extract_usage_from_json(resp.body), resp.status_code)
+            return resp
         finally:
             manager.request_finished()
 
@@ -105,9 +138,22 @@ def create_app(
         if request.method == "GET":
             # No model field in a GET; only forward when something is loaded.
             if manager.state is State.RUNNING:
+                started = time.monotonic()
                 manager.request_started()
                 try:
-                    return await proxy.plain("GET", path_and_query, request.headers, b"")
+                    resp = await proxy.plain("GET", path_and_query, request.headers, b"")
+                    if recorder is not None:
+                        try:
+                            recorder.record(
+                                model=manager.current_model or "",
+                                endpoint=request.url.path,
+                                stream=False,
+                                status=resp.status_code,
+                                duration_ms=(time.monotonic() - started) * 1000.0,
+                            )
+                        except Exception:  # noqa: BLE001
+                            logger.exception("usage recording failed for GET %s", request.url.path)
+                    return resp
                 finally:
                     manager.request_finished()
             raise SglangUnavailable("no model loaded; POST with a 'model' field to load one")
@@ -148,6 +194,44 @@ def create_app(
             "model": manager.current_model,
             "active_requests": manager.active_requests,
         }
+
+    # ------------------------------------------------------ usage / dashboard
+
+    def _parse_time(value: str | None) -> float | None:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            raise InvalidRequest(f"invalid time value {value!r}: use epoch seconds or ISO8601") from None
+
+    if recorder is not None:
+
+        @app.get("/gateway/usage")
+        async def gateway_usage(
+            model: str | None = None,
+            since: str | None = None,
+            until: str | None = None,
+            group_by: str = "hour",
+            limit: int = 50,
+        ):
+            if group_by not in ("hour", "day", "none"):
+                raise InvalidRequest(f"group_by must be one of hour|day|none, got {group_by!r}")
+            return recorder.query(
+                model=model or None,
+                since=_parse_time(since),
+                until=_parse_time(until),
+                group_by=None if group_by == "none" else group_by,
+                limit=max(1, min(int(limit), 500)),
+            )
+
+        @app.get("/gateway/dashboard", response_class=HTMLResponse)
+        async def gateway_dashboard():
+            return HTMLResponse(DASHBOARD_HTML)
 
     return app
 

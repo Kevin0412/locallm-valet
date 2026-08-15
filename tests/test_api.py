@@ -33,6 +33,8 @@ def make_upstream_app() -> FastAPI:
                 for i in range(3):
                     yield f"data: {{\"chunk\": {i}}}\n\n"
                     await asyncio.sleep(0.01)
+                yield ('data: {"id":"cmpl-1","object":"chat.completion.chunk","choices":[],'
+                       '"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}\n\n')
                 yield "data: [DONE]\n\n"
 
             return StreamingResponse(gen(), media_type="text/event-stream")
@@ -43,6 +45,7 @@ def make_upstream_app() -> FastAPI:
             "choices": [
                 {"index": 0, "message": {"role": "assistant", "content": "hello from upstream"}}
             ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         }
 
     @app.post("/v1/{path:path}")

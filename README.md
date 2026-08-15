@@ -44,6 +44,8 @@ sglang-manager :8000
 
 ## 核心规则（V1 边界）
 
+外部 API **只做 OpenAI-compatible**（`/v1/*`），不做其他协议格式；用量看板走独立的 `/gateway/*` 管理面。
+
 1. **单卡单活动模型**：同一时间只加载一个模型，不做多模型显存拼装。
 2. **请求按 `model` 决定行为**：
    - `RUNNING(qwen)` + `model=qwen` → 直接转发，**不重新检查显存**（已加载成功即为事实）。
@@ -132,6 +134,40 @@ RUNNING(a) ──switch(b)──▶ SWITCHING(a→b) ──▶ RUNNING(b)  （�
 - `POST /gateway/stop`：手动卸载（忙时 `503 model_switch_busy`）。
 - `POST /gateway/preload/{model}`：提前暖模型，等 ready 后返回（用于预热场景）。
 
+### 用量统计与看板（token usage）
+
+每个成功代理的请求都会在结束时记账（`stream=true` 在 SSE 流完整关闭后记账），
+tokens 取自上游响应的 OpenAI `usage` 字段：普通响应解析 JSON body；流式响应
+解析最后一个携带 `usage` 的 SSE `data:` 帧（帧跨 chunk 拆分也能正确识别）。
+数据落 SQLite（`usage.db_path`，默认 `data/usage.db`），**记录失败绝不影响请求**。
+
+- `GET /gateway/dashboard`：内置用量看板页面（纯内联 HTML/CSS/JS，无外部依赖）：
+  总览卡片（请求数 / 输入 / 输出 / 总 tokens / 平均耗时）、按小时/天趋势图、
+  按模型占比、最近 50 条请求；支持模型过滤、时间范围、15s 自动刷新。
+- `GET /gateway/usage`：看板的数据接口，参数：
+  - `model`：按模型过滤
+  - `since` / `until`：时间范围（epoch 秒或 ISO8601）
+  - `group_by`：`hour` | `day` | `none`（默认 `hour`，返回趋势序列）
+  - `limit`：最近请求条数（默认 50，上限 500）
+
+```json
+{
+  "summary": {"requests": 123, "prompt_tokens": 4560, "completion_tokens": 789,
+              "total_tokens": 5349, "avg_duration_ms": 812.3},
+  "by_model": [{"model": "qwen3.6-35b", "requests": 100, "prompt_tokens": 4000,
+                "completion_tokens": 700, "total_tokens": 4700}],
+  "series": [{"bucket_epoch": 1789000000, "bucket": "2026-08-16T01:00:00+00:00",
+              "requests": 10, "prompt_tokens": 400, "completion_tokens": 70}],
+  "recent": [{"id": 1, "ts": "2026-08-16T01:23:45+00:00", "model": "qwen3.6-35b",
+              "endpoint": "/v1/chat/completions", "stream": true, "status": 200,
+              "prompt_tokens": 40, "completion_tokens": 7, "total_tokens": 47,
+              "duration_ms": 1234.5}]
+}
+```
+
+配置：`usage.enabled`（默认 true）、`usage.db_path`；关闭后 `/gateway/usage` 与
+`/gateway/dashboard` 不再注册（404）。
+
 ## 配置
 
 复制 `config.example.yaml` 为 `config.yaml`：
@@ -203,12 +239,14 @@ SGLang 不需要 systemd 单元——manager 按需拉起/停止它。
 ```text
 sglang_manager/
 ├── __main__.py     CLI 入口
-├── api.py          FastAPI：/v1 代理 + /gateway 管理
+├── api.py          FastAPI：/v1 代理 + /gateway 管理 + /gateway/usage
 ├── config.py       YAML 配置加载/校验（idle 可配置）
+├── dashboard.py    用量看板页面（内联 HTML/CSS/JS）
 ├── errors.py       typed 错误体系
 ├── gpu.py          NVML 显存读取 + 释放等待
 ├── manager.py      状态机 + 生命周期锁 + watchdog + 记账
-├── proxy.py        OpenAI 兼容反向代理（含 SSE）
+├── proxy.py        OpenAI 兼容反向代理（含 SSE + usage 捕获）
 ├── runner.py       SGLang 子进程：启动/health/停止
-└── state.py        状态枚举
+├── state.py        状态枚举
+└── usage.py        SQLite token 用量记录与聚合
 ```

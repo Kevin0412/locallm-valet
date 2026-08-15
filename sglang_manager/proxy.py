@@ -16,6 +16,7 @@ from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
 from .errors import SglangUnavailable
+from .usage import SseUsageScanner
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class Proxy:
         headers: dict,
         body: bytes,
         on_finished: _RequestFinished,
+        on_usage: Callable[[dict | None, int], None] | None = None,
     ) -> StreamingResponse:
         """Streaming proxy.
 
@@ -89,7 +91,9 @@ class Proxy:
         headers are known), then handed to a generator that pumps the body.
         ``on_finished`` runs only when the stream has been fully consumed *or*
         closed by the client — this is what makes active-request accounting
-        correct for ``stream=true``.
+        correct for ``stream=true``.  ``on_usage`` (if given) is invoked once
+        the stream ends with the last SSE ``usage`` frame (or None) and the
+        upstream status code.
         """
 
         upstream = None
@@ -100,18 +104,27 @@ class Proxy:
             raise
 
         headers_out = self._response_headers(upstream.headers)
+        status_code = upstream.status_code
+        scanner = SseUsageScanner() if on_usage is not None else None
 
         async def gen():
             try:
                 async for chunk in upstream.aiter_raw():
+                    if scanner is not None:
+                        scanner.feed(chunk)
                     yield chunk
             finally:
+                if scanner is not None:
+                    try:
+                        on_usage(scanner.finish(), status_code)
+                    except Exception:  # noqa: BLE001 - recording must not break streaming
+                        logger.exception("usage capture callback failed")
                 await upstream.aclose()
                 on_finished()
 
         return StreamingResponse(
             gen(),
-            status_code=upstream.status_code,
+            status_code=status_code,
             headers=headers_out,
             media_type=headers_out.get("content-type"),
         )

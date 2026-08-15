@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from sglang_manager.config import Config, ModelSpec, SglangConfig
+from sglang_manager.config import Config, ModelSpec, SglangConfig, UsageConfig
 from sglang_manager.errors import SglangStartupFailed, SglangStartupTimeout
 from sglang_manager.manager import ModelManager
 
@@ -96,6 +96,7 @@ def make_config(**kwargs) -> Config:
     cfg.sglang = SglangConfig(host="127.0.0.1", port=30000, startup_timeout_seconds=180, stop_timeout_seconds=10)
     cfg.idle.timeout_seconds = kwargs.pop("idle_timeout", 3600.0)
     cfg.idle.check_interval_seconds = kwargs.pop("idle_check_interval", 60.0)
+    cfg.usage = UsageConfig(enabled=True, db_path=":memory:")
     if kwargs:
         raise TypeError(f"unexpected kwargs: {sorted(kwargs)}")
     return cfg

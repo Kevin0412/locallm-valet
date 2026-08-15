@@ -37,6 +37,11 @@ idle:
   timeout_seconds: 3600       # 1 小时无请求自动卸载
   check_interval_seconds: 15
 
+# token 用量统计 + 看板（SQLite 落盘，看板：GET /gateway/dashboard）
+usage:
+  enabled: true
+  db_path: data/usage.db      # 相对 manager 工作目录；":memory:" 仅用于测试
+
 models:
   # 对应 launch_qwen_3.6.sh：
   #   python -m sglang.launch_server --model-path Qwen/Qwen3.6-35B-A3B-FP8 --port 8000
