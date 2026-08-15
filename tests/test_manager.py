@@ -257,6 +257,39 @@ async def test_force_stop_during_starting(manager, gpu, runner):
     assert runner.model is None
 
 
+async def test_client_disconnect_during_start_does_not_wedge(manager, gpu, runner):
+    """The triggering request being cancelled mid-startup (client disconnect)
+    must not leave the machine wedged in STARTING: the process is cleaned up,
+    the state lands in STOPPED, and a later request can start again."""
+    gpu.free_g = 40
+    runner.health_delay = 0.2
+    t = asyncio.create_task(manager.ensure_loaded("qwen"))
+    await asyncio.sleep(0.05)
+    assert manager.state is State.STARTING
+    t.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t
+    assert manager.state is State.STOPPED
+    assert runner.model is None  # no orphan process
+    # not wedged: a new request can cold-start again
+    await manager.ensure_loaded("qwen")
+    assert manager.state is State.RUNNING
+    assert runner.starts == ["qwen", "qwen"]
+
+
+async def test_shutdown_during_start_cancels_cleanly(gpu, runner):
+    m = ModelManager(make_config(), gpu=gpu, runner=runner)
+    gpu.free_g = 40
+    runner.health_delay = 0.2
+    t = asyncio.create_task(m.ensure_loaded("qwen"))
+    await asyncio.sleep(0.05)
+    await m.shutdown()
+    assert m.state is State.STOPPED
+    assert runner.model is None
+    with pytest.raises(SglangUnavailable):
+        await t  # the waiting request gets a clean error, not a hang
+
+
 async def test_request_accounting(manager, gpu, runner):
     gpu.free_g = 40
     await manager.ensure_loaded("qwen")

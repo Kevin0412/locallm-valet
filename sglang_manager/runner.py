@@ -190,13 +190,19 @@ class SglangRunner:
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
-            except asyncio.TimeoutError:
-                logger.warning("SGLang pid=%d ignored SIGTERM, sending SIGKILL", proc.pid)
+            except BaseException:
+                # Timeout OR cancellation (e.g. the requesting client
+                # disconnected) — never leave a half-dead child holding VRAM.
+                logger.warning("SGLang pid=%d did not exit in time, sending SIGKILL", proc.pid)
                 try:
                     proc.kill()
                 except ProcessLookupError:
                     pass
-                await proc.wait()
+                try:
+                    await asyncio.shield(proc.wait())
+                except BaseException:
+                    pass
+                raise
         logger.info("SGLang stopped (pid=%d)", proc.pid)
 
     async def aclose(self) -> None:

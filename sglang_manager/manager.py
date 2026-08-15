@@ -237,6 +237,14 @@ class ModelManager:
             mapped = exc if isinstance(exc, SglangStartupFailed) else SglangStartupFailed(str(exc))
             self._fail_start(mapped)
             raise mapped
+        except BaseException as exc:  # CancelledError: client disconnected mid-start
+            logger.warning("start interrupted by %s; aborting cleanly", type(exc).__name__)
+            try:
+                await self._cleanup_after_failed_start()
+            except BaseException:
+                pass
+            self._fail_start(SglangUnavailable("start cancelled before completion"))
+            raise
 
         self.state = State.RUNNING
         self.current_model = spec.name
@@ -319,6 +327,14 @@ class ModelManager:
             )
             self._fail_switch(mapped)
             raise mapped
+        except BaseException as exc:  # CancelledError: client disconnected mid-switch
+            logger.warning("switch interrupted by %s; aborting cleanly", type(exc).__name__)
+            try:
+                await self._cleanup_after_failed_start()
+            except BaseException:
+                pass
+            self._fail_switch(SglangUnavailable("switch cancelled before completion"))
+            raise
 
         self.state = State.RUNNING
         self.current_model = spec.name
@@ -441,7 +457,10 @@ class ModelManager:
             self._watchdog_task.cancel()
             self._watchdog_task = None
         if self.state is not State.STOPPED:
-            self.state = State.STOPPING
+            async with self._transition_lock:
+                if self.state in (State.STARTING, State.SWITCHING):
+                    self._cancel_transition(SglangUnavailable("manager shutdown"))
+                self.state = State.STOPPING
             await self._do_stop(reason="manager shutdown")
         await self.runner.aclose()
 

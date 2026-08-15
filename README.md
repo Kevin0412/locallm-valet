@@ -80,6 +80,21 @@ RUNNING(a) ──switch(b)──▶ SWITCHING(a→b) ──▶ RUNNING(b)  （�
 | SWITCHING(a→b) | 等待切换完成 | `503 model_switch_busy` |
 | STOPPING | `503 sglang_unavailable`（稍后重试） | 同左 |
 
+### 冷启动等待与超时
+
+未命中已加载模型时（`STOPPED` 或需切换），请求会在 manager 内**挂起等待**：
+SGLang 启动 → health ready → 转发原请求。超时相关三个时间：
+
+| 时间 | 默认 | 说明 |
+|---|---|---|
+| 模型加载耗时 | 实测 35B FP8 86~188s、27B ~90s | 真正的等待时长 |
+| `sglang.startup_timeout_seconds` | 180（本机配置 600） | 服务端兜底：超时返回 503 `sglang_startup_timeout`，**不会无限挂** |
+| 客户端 timeout | openai-python 默认 600s；httpx/requests 默认 5s | **主要风险点**：httpx 默认 5s 冷启动必超时，务必设 `timeout=600` 或 `None` |
+
+启动期间：同模型并发请求共享同一次启动、就绪后一起转发；异模型请求立即
+503 `model_switch_busy`。触发启动的客户端中途断开**不会卡死状态机**——启动
+被安全取消（进程清理、状态回 `STOPPED`），后续请求可重新启动。
+
 ## 错误类型
 
 | HTTP | error.type | 含义 |
