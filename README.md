@@ -99,6 +99,31 @@ A backend only needs to (1) expose an OpenAI-compatible API and (2) return 200 o
 
 > **vLLM caveat**: vLLM strictly validates the `model` field against `--served-model-name` (defaults to the model path). Set `--served-model-name <registry name>` in `extra_args` so it matches the name clients send.
 
+### Mixing backends in one registry
+
+The global template applies to every model **unless a model defines its own**
+(`models.<name>.backend.command_template`, plus `backend.health_path` for
+backends whose readiness path differs). Only one model runs at a time, so the
+shared internal port never collides:
+
+```yaml
+models:
+  vllm-qwen2.5-7b:
+    path: /models/Qwen2.5-7B-Instruct
+    required_vram_gib: 18
+    backend:
+      command_template: "{python} -m vllm.entrypoints.openai.api_server --model {model_path} --host {host} --port {port} {extra_args}"
+      extra_args: ["--served-model-name", "vllm-qwen2.5-7b"]
+  llama3.2-3b-gguf:
+    path: C:\models\llama-3.2-3b-instruct-q8.gguf
+    required_ram_gib: 8
+    backend:
+      command_template: "llama-server -m {model_path} --host {host} --port {port} {extra_args}"
+      extra_args: ["--ctx-size", 8192]
+```
+
+Numbers in `extra_args` are coerced to strings automatically (no quoting needed).
+
 ## Resource gates (VRAM + RAM)
 
 Per model: `required_vram_gib` (GPU) and `required_ram_gib` (system RAM); threshold = requirement + `memory.safety_margin_gib`.
@@ -218,7 +243,7 @@ Env overrides: `LLM_GATEWAY_CONFIG`, `LLM_GATEWAY_HOST`, `LLM_GATEWAY_PORT`, `LL
 
 ```bash
 pip install -e ".[dev]"
-pytest -v     # 94 tests, fake memory/runner — no GPU required
+pytest -v     # 97 tests, fake memory/runner — no GPU required
 ```
 
 Layout:

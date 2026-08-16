@@ -109,6 +109,30 @@ command_template: "{python} -m my_openvino_server --model {model_path} --port {p
 > 模型路径名）是否一致。请在 `extra_args` 里加 `--served-model-name <registry 名称>`
 > 与客户端发送的名称对齐。
 
+### 一个 registry 混用多个后端
+
+全局模板作用于所有**未定义自己的模板**的模型（`models.<name>.backend.command_template`
+按模型覆盖；`backend.health_path` 同样支持按模型覆盖，适配就绪路径不同的后端）。
+由于同一时间只跑一个模型，共用的内部端口（30000）不会冲突：
+
+```yaml
+models:
+  vllm-qwen2.5-7b:
+    path: /models/Qwen2.5-7B-Instruct
+    required_vram_gib: 18
+    backend:
+      command_template: "{python} -m vllm.entrypoints.openai.api_server --model {model_path} --host {host} --port {port} {extra_args}"
+      extra_args: ["--served-model-name", "vllm-qwen2.5-7b"]
+  llama3.2-3b-gguf:
+    path: C:\models\llama-3.2-3b-instruct-q8.gguf
+    required_ram_gib: 8
+    backend:
+      command_template: "llama-server -m {model_path} --host {host} --port {port} {extra_args}"
+      extra_args: ["--ctx-size", 8192]
+```
+
+`extra_args` 里的数字会自动转成字符串（不用加引号）。
+
 ## 资源门控（显存 + 内存）
 
 每个模型配置 `required_vram_gib`（显存）与 `required_ram_gib`（系统内存），
@@ -236,7 +260,7 @@ models:   # 每模型：path、required_vram_gib、required_ram_gib、backend.ex
 
 ```bash
 pip install -e ".[dev]"
-pytest -v     # 94 个测试，fake memory/runner——无需 GPU
+pytest -v     # 97 个测试，fake memory/runner——无需 GPU
 ```
 
 目录结构：

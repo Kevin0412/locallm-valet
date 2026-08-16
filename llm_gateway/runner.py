@@ -68,8 +68,9 @@ def build_backend_command(cfg: BackendConfig, spec: ModelSpec, device: int) -> l
         {python} -m my_openvino_server --model {model_path} --port {port} {extra_args}
     """
 
+    template = spec.backend.command_template or cfg.command_template
     extra = " ".join(shlex.quote(a) for a in spec.backend.extra_args)
-    rendered = cfg.command_template.format(
+    rendered = template.format(
         python=shlex.quote(sys.executable),
         model_path=shlex.quote(spec.path),
         model_name=shlex.quote(spec.name),
@@ -78,7 +79,7 @@ def build_backend_command(cfg: BackendConfig, spec: ModelSpec, device: int) -> l
         device=str(device),
         extra_args=extra,
     )
-    if "{extra_args}" not in cfg.command_template and extra:
+    if "{extra_args}" not in template and extra:
         rendered += " " + extra
     cmd = shlex.split(rendered)
     logger.info("launching backend: %s (device %s)", " ".join(cmd), device)
@@ -130,6 +131,7 @@ class BackendRunner:
         self._http = http_client or httpx.AsyncClient(timeout=httpx.Timeout(5.0))
         self.proc: asyncio.subprocess.Process | None = None
         self.model_name: str | None = None
+        self.health_path: str = cfg.health_path
         self._monitor_task: asyncio.Task | None = None
 
     @property
@@ -148,6 +150,7 @@ class BackendRunner:
             stderr=asyncio.subprocess.PIPE,
         )
         self.model_name = spec.name
+        self.health_path = spec.backend.health_path or self.cfg.health_path
         logger.info("backend started: pid=%d model=%s", self.proc.pid, spec.name)
         self._monitor_task = asyncio.create_task(self._monitor(), name="backend-exit-monitor")
         # Drain the pipes into the manager log, otherwise a chatty backend can
@@ -185,7 +188,7 @@ class BackendRunner:
         proc = self.proc
         if proc is None:
             raise BackendStartupFailed("backend process was never started")
-        url = f"{self.cfg.base_url}{self.cfg.health_path}"
+        url = f"{self.cfg.base_url}{self.health_path}"
         deadline = time.monotonic() + timeout_seconds
         last_error: Exception | None = None
         while True:

@@ -50,6 +50,12 @@ class ModelBackendArgs:
     # Extra environment variables, merged over the global ``backend.env``
     # (e.g. ``SGLANG_USE_MODELSCOPE: "true"`` or an ``LD_PRELOAD``).
     env: dict[str, str] = field(default_factory=dict)
+    # Per-model overrides; fall back to the global ``backend.*`` settings.
+    # This is how one registry mixes backends (e.g. a vLLM model and a
+    # llama.cpp model side by side — only one runs at a time, so the shared
+    # internal port is safe).
+    command_template: str | None = None
+    health_path: str | None = None
 
 
 @dataclass
@@ -151,15 +157,29 @@ def _parse_model_backend(raw: Any, name: str) -> ModelBackendArgs:
         return out
     for key, value in _require_mapping(raw, "backend", f"models.{name}.backend").items():
         if key == "extra_args":
-            if not isinstance(value, list) or not all(isinstance(a, str) for a in value):
+            if not isinstance(value, list):
+                raise ConfigError(f"models.{name}.backend.extra_args: expected a list")
+            # YAML scalars like --ctx-size / 8192 arrive as int/float/bool;
+            # coerce them so users don't have to quote every number.
+            out.extra_args = [
+                str(a) if isinstance(a, (int, float, bool)) else a for a in value
+            ]
+            if not all(isinstance(a, str) for a in out.extra_args):
                 raise ConfigError(f"models.{name}.backend.extra_args: expected a list of strings")
-            out.extra_args = list(value)
         elif key == "env":
             if not isinstance(value, dict) or not all(
                 isinstance(k, str) and isinstance(v, str) for k, v in value.items()
             ):
                 raise ConfigError(f"models.{name}.backend.env: expected a mapping of strings to strings")
             out.env = dict(value)
+        elif key == "command_template":
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"models.{name}.backend.command_template: expected a non-empty string")
+            out.command_template = value
+        elif key == "health_path":
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"models.{name}.backend.health_path: expected a non-empty string")
+            out.health_path = value
         else:
             raise ConfigError(f"models.{name}.backend: unknown key {key!r}")
     return out

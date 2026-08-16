@@ -8,8 +8,8 @@ from llm_gateway.runner import build_backend_command, build_process_env
 
 def make_spec(**kwargs) -> ModelSpec:
     kwargs.setdefault("path", "/models/qwen")
+    kwargs.setdefault("name", "qwen")
     return ModelSpec(
-        name="qwen",
         required_vram_gib=30,
         backend=ModelBackendArgs(
             extra_args=["--kv-cache-dtype", "fp8_e4m3"],
@@ -94,3 +94,84 @@ def test_model_env_overrides_global_env():
     assert env["A"] == "model"
     assert env["LD_PRELOAD"] == "/lib/libstdc++.so.6"
     assert env["SGLANG_USE_MODELSCOPE"] == "true"
+
+
+# ------------------------------------------- per-model overrides (mixed backends)
+
+def test_per_model_command_template_override():
+    """One registry can mix backends: a per-model template wins over the
+    global one (e.g. vLLM model + llama.cpp model side by side)."""
+    global_cfg = BackendConfig()  # SGLang default
+    vllm = make_spec(name="vllm-qwen", path="/models/Qwen2.5-7B")
+    vllm.backend.command_template = (
+        "{python} -m vllm.entrypoints.openai.api_server --model {model_path} "
+        "--host {host} --port {port} {extra_args}"
+    )
+    llama = make_spec(name="llama3.2-3b", path="/models/llama-3.2-3b-q8.gguf")
+    llama.backend.command_template = "llama-server -m {model_path} --host {host} --port {port} {extra_args}"
+
+    cmd_vllm = build_backend_command(global_cfg, vllm, device=0)
+    cmd_llama = build_backend_command(global_cfg, llama, device=0)
+
+    assert cmd_vllm[0] == sys.executable
+    assert "vllm.entrypoints.openai.api_server" in cmd_vllm
+    assert cmd_vllm[cmd_vllm.index("--model") + 1] == "/models/Qwen2.5-7B"
+    assert "--model-path" not in cmd_vllm  # no SGLang flags leaked
+    assert cmd_llama[0] == "llama-server"
+    assert cmd_llama[cmd_llama.index("-m") + 1] == "/models/llama-3.2-3b-q8.gguf"
+    assert "--model-path" not in cmd_llama
+
+
+class _FakeProc:
+    returncode = None
+    pid = 9999
+    stdout = None
+    stderr = None
+
+    async def wait(self):
+        return 0
+
+    def terminate(self):
+        self.returncode = -15
+
+    def kill(self):
+        self.returncode = -9
+
+
+class _FakeHttp:
+    def __init__(self):
+        self.urls = []
+
+    async def get(self, url):
+        self.urls.append(url)
+
+        class _R:
+            status_code = 200
+
+        return _R()
+
+    async def aclose(self):
+        pass
+
+
+async def test_per_model_health_path_override(monkeypatch):
+    """Different backends may use different readiness paths; the per-model
+    health_path must be used for polling."""
+    import asyncio
+
+    from llm_gateway.runner import BackendRunner
+
+    async def fake_spawn(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    http = _FakeHttp()
+    cfg = BackendConfig(host="127.0.0.1", port=30000, health_path="/health")
+    spec = make_spec()
+    spec.backend.health_path = "/healthz"  # e.g. a custom OpenVINO server
+    runner = BackendRunner(cfg, http_client=http)  # type: ignore[arg-type]
+    await runner.start(spec)
+    await runner.wait_health(10)
+    assert http.urls == ["http://127.0.0.1:30000/healthz"]
+    assert runner.health_path == "/healthz"
+    await runner.stop(1)

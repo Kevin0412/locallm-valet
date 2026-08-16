@@ -167,3 +167,32 @@ def test_api_key_invalid_type(tmp_path, monkeypatch):
             "server: {host: 0.0.0.0, port: 8123}",
             "server: {host: 0.0.0.0, port: 8123, api_key: 42}",
         )))
+
+
+def test_per_model_backend_overrides(tmp_path, monkeypatch):
+    """Per-model command_template / health_path are parsed and fall back to
+    the global backend.* settings when absent."""
+    for var in ("LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS"):
+        monkeypatch.delenv(var, raising=False)
+    lines = [
+        "      command_template: llama-server -m {model_path} {extra_args}",
+        "      health_path: /healthz",
+        "      extra_args: [--ctx-size, 8192]",
+    ]
+    text = SAMPLE.replace(
+        "      extra_args: [--kv-cache-dtype, fp8_e4m3]",
+        "\n".join(lines),
+    )
+    cfg = load_config(write_sample(tmp_path, text))
+    q = cfg.models["qwen"]
+    assert q.backend.command_template == "llama-server -m {model_path} {extra_args}"
+    assert q.backend.health_path == "/healthz"
+    assert q.backend.extra_args == ["--ctx-size", "8192"]
+    # another model without overrides falls back to the global template
+    text2 = text.replace(
+        "models:\n  qwen:",
+        "models:\n  other:\n    path: /m/other\n    backend:\n      extra_args: []\n  qwen:",
+    )
+    cfg2 = load_config(write_sample(tmp_path, text2))
+    assert cfg2.models["other"].backend.command_template is None
+    assert cfg2.models["other"].backend.health_path is None

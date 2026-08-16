@@ -22,20 +22,22 @@ backend:
   # Launch command template — the core of backend-agnosticism.
   # Placeholders: {python} {model_path} {model_name} {host} {port} {device} {extra_args}
   # NOTE: {python} is the gateway's own interpreter; if the backend lives in
-  # another environment (e.g. conda), write the full interpreter path inline
-  # (see the SGLang example below).
+  # another environment (e.g. conda), write the full interpreter path inline.
   #
-  # vLLM (also add --served-model-name <registry name> in extra_args so the
-  # model field matches):
+  # One line per backend — pick yours (the global template applies to every
+  # model that does NOT define its own; see the mixed-backend example below):
+  #
+  #   # SGLang
+  #   command_template: "{python} -m sglang.launch_server --model-path {model_path} --host {host} --port {port} --tp-size 1 {extra_args}"
+  #   # vLLM (also add --served-model-name <registry name> in extra_args so
+  #   # the model field matches; see the mixed example below)
   #   command_template: "{python} -m vllm.entrypoints.openai.api_server --model {model_path} --host {host} --port {port} {extra_args}"
-  # llama.cpp (Linux / macOS / Windows — an .exe path works directly):
+  #   # llama.cpp (Linux / macOS / Windows — an .exe path works directly)
   #   command_template: "llama-server -m {model_path} --host {host} --port {port} {extra_args}"
-  # OpenVINO GenAI (custom OpenAI-compatible server, CPU/NPU):
+  #   # OpenVINO GenAI (custom OpenAI-compatible server, CPU/NPU)
   #   command_template: "{python} -m my_openvino_server --model {model_path} --port {port} {extra_args}"
   #
-  # SGLang (default if command_template is omitted):
-  # command_template: "{python} -m sglang.launch_server --model-path {model_path} --host {host} --port {port} --tp-size 1 {extra_args}"
-  # This machine (conda env qwen3.5):
+  # Active on this machine (conda env qwen3.5 + SGLang):
   command_template: "/home/test/anaconda3/envs/qwen3.5/bin/python -m sglang.launch_server --model-path {model_path} --host {host} --port {port} --tp-size 1 {extra_args}"
 
   # Global env for the backend child (CUDA_VISIBLE_DEVICES=<memory.device> is
@@ -98,4 +100,22 @@ models:
   #   path: C:\models\llama-3.2-3b-instruct-q8.gguf
   #   required_ram_gib: 8
   #   backend:
-  #     extra_args: ["--ctx-size", "8192", "-ngl", "0"]
+  #     extra_args: ["--ctx-size", 8192, "-ngl", 0]
+
+  # ---- MIXED BACKENDS: vLLM and llama.cpp in one registry ----
+  # Per-model backend.command_template overrides the global one; per-model
+  # backend.health_path likewise. Only one model runs at a time, so the
+  # shared internal port (30000) never collides.
+  # vllm-qwen2.5-7b:
+  #   path: /models/Qwen2.5-7B-Instruct
+  #   required_vram_gib: 18
+  #   backend:
+  #     command_template: "{python} -m vllm.entrypoints.openai.api_server --model {model_path} --host {host} --port {port} {extra_args}"
+  #     extra_args: ["--served-model-name", "vllm-qwen2.5-7b"]
+  # llama3.2-3b-gguf:
+  #   path: C:\models\llama-3.2-3b-instruct-q8.gguf
+  #   required_ram_gib: 8
+  #   backend:
+  #     command_template: "llama-server -m {model_path} --host {host} --port {port} {extra_args}"
+  #     health_path: /health
+  #     extra_args: ["--ctx-size", 8192]
