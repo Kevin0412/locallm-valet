@@ -348,7 +348,7 @@ async def _auth_app(keys: list[str]):
 async def test_api_key_required_when_configured():
     app = await _auth_app(["sk-secret"])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
-        # missing key
+        # missing key -> /v1/* protected
         r = await client.get("/v1/models")
         assert r.status_code == 401
         err = r.json()["error"]
@@ -360,11 +360,11 @@ async def test_api_key_required_when_configured():
         # correct key
         r = await client.get("/v1/models", headers={"Authorization": "Bearer sk-secret"})
         assert r.status_code == 200
-        # gateway data endpoints protected too
-        assert (await client.get("/gateway/usage")).status_code == 401
-        assert (
-            await client.get("/gateway/usage", headers={"Authorization": "Bearer sk-secret"})
-        ).status_code == 200
+        # read-only gateway GETs are open (dashboard/status/usage — monitoring
+        # data is not a secret)
+        assert (await client.get("/gateway/usage")).status_code == 200
+        assert (await client.get("/gateway/status")).status_code == 200
+        assert (await client.get("/gateway/models")).status_code == 200
 
 
 async def test_api_key_any_of_multiple():
@@ -376,6 +376,7 @@ async def test_api_key_any_of_multiple():
 async def test_api_key_post_protected():
     app = await _auth_app(["sk-secret"])
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        # /v1/* POSTs need the key
         r = await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
         assert r.status_code == 401
         r = await client.post(
@@ -384,6 +385,13 @@ async def test_api_key_post_protected():
             headers={"Authorization": "Bearer sk-secret"},
         )
         assert r.status_code == 200
+        # gateway WRITES (stop/force-stop/preload) still need the key
+        r = await client.post("/gateway/stop")
+        assert r.status_code == 401
+        r = await client.post("/gateway/stop", headers={"Authorization": "Bearer sk-secret"})
+        assert r.status_code == 200
+        r = await client.post("/gateway/preload/gemma")
+        assert r.status_code == 401
 
 
 async def test_dashboard_page_exempt_from_auth():

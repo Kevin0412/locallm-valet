@@ -74,19 +74,23 @@ def create_app(
 
     if config.server.api_keys:
         _AUTH_EXEMPT_PREFIXES = ("/docs", "/redoc", "/openapi.json")
-        _AUTH_EXEMPT_EXACT = ("/gateway/dashboard",)
 
         @app.middleware("http")
         async def _api_key_auth(request: Request, call_next):
-            """Bearer API-key gate for /v1/* and /gateway/* data endpoints.
+            """Bearer API-key gate.
 
-            The dashboard page itself is exempt (static shell, no data); its
-            JS prompts for the key and sends it on data fetches.  Docs pages
-            are exempt (schema only).  Everything else requires a valid key
-            when ``server.api_keys`` is configured.
+            Protected: every ``/v1/*`` request (the OpenAI-compatible surface)
+            and every write on ``/gateway/*`` (stop / force-stop / preload —
+            the operations that can tear down the service).
+
+            Open: read-only ``GET /gateway/*`` (status / models / usage /
+            dashboard) — monitoring data is not a secret, so the dashboard
+            works without a key.  Docs pages are exempt (schema only).
             """
             path = request.url.path
-            if path.startswith(_AUTH_EXEMPT_PREFIXES) or path in _AUTH_EXEMPT_EXACT:
+            if path.startswith(_AUTH_EXEMPT_PREFIXES):
+                return await call_next(request)
+            if request.method == "GET" and path.startswith("/gateway/"):
                 return await call_next(request)
             auth = request.headers.get("authorization", "")
             token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
