@@ -1,0 +1,16 @@
+# Caddy 反代示例：把 OpenAI API 和管理面暴露到你的域名。
+# 替换 your.domain.com 为你自己的域名后放入 Caddy 配置（需 sudo 编辑
+# /etc/caddy/Caddyfile 并 systemctl reload caddy）。
+# 注意：公网暴露务必在 config.yaml 配置 server.api_key！
+
+your.domain.com {
+	# OpenAI-compatible API（客户端入口）
+	handle /v1/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# 管理面：状态 / 用量看板 / stop 等
+	handle /gateway/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+}
