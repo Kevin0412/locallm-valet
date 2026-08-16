@@ -25,7 +25,7 @@ client.chat.completions.create(model="llama3.1-8b", messages=[...])  # automatic
 - **Backend-agnostic**: a single `command_template` adapts any OpenAI-compatible server (SGLang, vLLM, llama.cpp, OpenVINO, ...). No backend-specific code, no hardcoded flags.
 - **On-demand lifecycle**: the gateway spawns, health-checks, stops and switches the backend process. The backend is never left running when idle.
 - **Resource-aware**: dual gates — GPU VRAM (NVML, skipped automatically when no NVIDIA driver) + system RAM (psutil, cross-platform). Never hard-start into an OOM.
-- **No preemption**: switching is refused while requests are in flight — streaming connections are never cut (unless you force-stop).
+- **No preemption**: in-flight generations are never killed. A different-model request while busy gets `503 model_switch_busy` by default — or, with `server.switch_when_busy: wait`, the gateway waits (up to `switch_wait_timeout_seconds`) for busy requests to drain and then switches, which is agent-friendly.
 - **Formal state machine** (`STOPPED / STARTING / RUNNING / STOPPING / SWITCHING`) with a global lifecycle lock; racing requests can never start two backends.
 - **Idle watchdog**: auto-unload after a configurable idle timeout (default 1 hour, never hardcoded — YAML or `LOCALLM_VALET_IDLE_TIMEOUT_SECONDS`).
 - **Token usage tracking**: per-request tokens (plain + streaming) recorded to SQLite, with a built-in usage dashboard.

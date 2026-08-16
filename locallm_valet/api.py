@@ -110,7 +110,12 @@ def create_app(
 
     @app.exception_handler(ManagerError)
     async def _manager_error_handler(request: Request, exc: ManagerError):
-        return JSONResponse(status_code=exc.http_status, content={"error": exc.to_payload()})
+        headers = {"Retry-After": "5"} if exc.http_status == 503 else None
+        return JSONResponse(
+            status_code=exc.http_status,
+            content={"error": exc.to_payload()},
+            headers=headers,
+        )
 
     async def _route_with_gate(request: Request, body: bytes, payload: dict) -> object:
         """Gate on ``model``, then forward; owns active-request accounting

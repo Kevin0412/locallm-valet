@@ -274,6 +274,7 @@ async def test_gateway_stop_refused_when_busy(stack):
     resp = await client.post("/gateway/stop")
     assert resp.status_code == 503
     assert resp.json()["error"]["type"] == "model_switch_busy"
+    assert resp.headers.get("retry-after") == "5"  # clients can retry
     assert manager.state.value == "running"
     manager.request_finished()
 

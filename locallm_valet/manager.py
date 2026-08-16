@@ -157,10 +157,24 @@ class ModelManager:
 
             # RUNNING with a different model.
             if self.active_requests > 0:
-                raise ModelSwitchBusy(
-                    f"model {self.current_model!r} has {self.active_requests} active "
-                    f"request(s); switching to {model_name!r} refused (no preemption)"
-                )
+                if self.cfg.server.switch_when_busy == "wait":
+                    # Never preempt; wait for the busy requests to drain,
+                    # then re-evaluate (and switch). Times out with a clear
+                    # 503 if the model stays busy.
+                    deadline = time.monotonic() + self.cfg.server.switch_wait_timeout_seconds
+                    while self.active_requests > 0 and self.state is State.RUNNING:
+                        if time.monotonic() >= deadline:
+                            raise ModelSwitchBusy(
+                                f"model {self.current_model!r} stayed busy for "
+                                f"{self.cfg.server.switch_wait_timeout_seconds:.0f}s; "
+                                f"switching to {model_name!r} refused (no preemption)"
+                            )
+                        await asyncio.sleep(0.2)
+                else:
+                    raise ModelSwitchBusy(
+                        f"model {self.current_model!r} has {self.active_requests} active "
+                        f"request(s); switching to {model_name!r} refused (no preemption)"
+                    )
             await self._switch(spec)
 
     def request_started(self) -> None:

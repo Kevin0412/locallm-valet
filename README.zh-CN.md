@@ -31,7 +31,9 @@ client.chat.completions.create(model="llama3.1-8b", messages=[...])  # 自动切
 - **按需生命周期**：网关负责拉起、健康检查、停止、切换后端进程；空闲时后端绝非常驻。
 - **资源感知**：双门控——GPU 显存（NVML，无 NVIDIA 驱动时自动跳过）+ 系统内存
   （psutil，跨平台）。绝不硬启动撞 OOM。
-- **不抢占**：有请求在途时拒绝切换——流式连接永不被切断（除非 force-stop）。
+- **不抢占**：绝不杀在途生成。默认有请求在途时异模型请求得 `503 model_switch_busy`；
+  配置 `server.switch_when_busy: wait` 后改为等请求排空（最多 `switch_wait_timeout_seconds`）
+  再切换——对 agent 更友好，依然不抢占。
 - **正式状态机**（`STOPPED / STARTING / RUNNING / STOPPING / SWITCHING`）+ 全局
   生命周期锁：并发请求绝不可能拉起两个后端。
 - **空闲看门狗**：空闲超时自动卸载（默认 1 小时，**可配置不硬编码**——YAML 或

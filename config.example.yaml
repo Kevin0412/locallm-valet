@@ -5,6 +5,13 @@
 server:
   host: 0.0.0.0
   port: 8000          # the only client-facing entry (OpenAI-compatible)
+  # switch_when_busy: refuse | wait (default refuse)
+  #   refuse: a different-model request while the loaded model is busy gets
+  #           503 model_switch_busy (no preemption)
+  #   wait:   wait up to switch_wait_timeout_seconds for busy requests to
+  #           drain, then switch — agent-friendly, still never preempts
+  # switch_when_busy: wait
+  # switch_wait_timeout_seconds: 120
   # API-key auth: when set, every /v1/* and /gateway/* data endpoint requires
   # `Authorization: Bearer <key>` (401 otherwise). A list of keys is allowed.
   # Unset = open access. Env: LOCALLM_VALET_API_KEY (comma-separated).

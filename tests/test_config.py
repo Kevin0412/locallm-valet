@@ -209,3 +209,18 @@ def test_per_model_backend_overrides(tmp_path, monkeypatch):
     cfg2 = load_config(write_sample(tmp_path, text2))
     assert cfg2.models["other"].backend.command_template is None
     assert cfg2.models["other"].backend.health_path is None
+
+
+def test_switch_when_busy_option(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCALLM_VALET_IDLE_TIMEOUT_SECONDS", raising=False)
+    cfg = load_config(write_sample(tmp_path, SAMPLE.replace(
+        "server: {host: 0.0.0.0, port: 8123}",
+        "server: {host: 0.0.0.0, port: 8123, switch_when_busy: wait, switch_wait_timeout_seconds: 30}",
+    )))
+    assert cfg.server.switch_when_busy == "wait"
+    assert cfg.server.switch_wait_timeout_seconds == 30
+    with pytest.raises(ConfigError, match="switch_when_busy"):
+        load_config(write_sample(tmp_path, SAMPLE.replace(
+            "server: {host: 0.0.0.0, port: 8123}",
+            "server: {host: 0.0.0.0, port: 8123, switch_when_busy: kill}",
+        )))

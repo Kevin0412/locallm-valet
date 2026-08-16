@@ -86,6 +86,13 @@ class ModelSpec:
 class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8000
+    # Behavior when a request asks for a *different* model while the loaded
+    # one is busy (active_requests > 0). "refuse" (default) returns
+    # 503 model_switch_busy immediately; "wait" waits up to
+    # switch_wait_timeout_seconds for the busy requests to drain, then
+    # switches — never preempting in-flight generations.
+    switch_when_busy: str = "refuse"   # refuse | wait
+    switch_wait_timeout_seconds: float = 120.0
     # Accepted API keys (``Authorization: Bearer <key>``). Empty = auth
     # disabled (open access). Multiple keys allowed.
     api_keys: list[str] = field(default_factory=list)
@@ -273,6 +280,13 @@ def load_config(path: str | Path | None = None) -> Config:
     server = _require_mapping(root.get("server"), "server", "server")
     cfg.server.host = str(server.get("host", cfg.server.host))
     cfg.server.port = int(server.get("port", cfg.server.port))
+    switch_when_busy = str(server.get("switch_when_busy", cfg.server.switch_when_busy))
+    if switch_when_busy not in ("refuse", "wait"):
+        raise ConfigError(f"server.switch_when_busy: expected refuse|wait, got {switch_when_busy!r}")
+    cfg.server.switch_when_busy = switch_when_busy
+    cfg.server.switch_wait_timeout_seconds = float(
+        server.get("switch_wait_timeout_seconds", cfg.server.switch_wait_timeout_seconds)
+    )
     api_key_raw = server.get("api_key")
     if api_key_raw is not None:
         if isinstance(api_key_raw, str):

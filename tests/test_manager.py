@@ -397,3 +397,49 @@ async def test_context_probe_failure_is_benign(manager, memory, runner):
     await manager.ensure_loaded("qwen")
     assert manager.state is State.RUNNING
     assert manager.max_context_tokens is None
+
+
+async def test_switch_waits_for_busy_drain(manager, memory, runner):
+    """switch_when_busy=wait: a switch request waits for in-flight requests to
+    drain, then switches — never preempting."""
+    cfg = make_config()
+    cfg.server.switch_when_busy = "wait"
+    cfg.server.switch_wait_timeout_seconds = 5.0
+    m = ModelManager(cfg, memory=memory, runner=runner)
+    memory.free_g = 40
+    await m.ensure_loaded("qwen")
+    m.request_started()  # one in-flight request
+    task = asyncio.create_task(m.ensure_loaded("gemma"))
+    await asyncio.sleep(0.1)
+    assert task.done() is False          # waiting, not refused
+    assert runner.stops == 0             # nothing preempted
+    m.request_finished()                 # the busy request finishes
+    await asyncio.wait_for(task, timeout=2)
+    assert m.state is State.RUNNING
+    assert m.current_model == "gemma"
+    assert runner.stops == 1
+
+
+async def test_switch_wait_times_out(manager, memory, runner):
+    cfg = make_config()
+    cfg.server.switch_when_busy = "wait"
+    cfg.server.switch_wait_timeout_seconds = 0.3
+    m = ModelManager(cfg, memory=memory, runner=runner)
+    memory.free_g = 40
+    await m.ensure_loaded("qwen")
+    m.request_started()  # stays busy past the timeout
+    with pytest.raises(ModelSwitchBusy):
+        await m.ensure_loaded("gemma")
+    assert m.current_model == "qwen"
+    assert runner.stops == 0
+    m.request_finished()
+
+
+async def test_switch_still_refuses_when_wait_disabled(manager, memory, runner):
+    """Default refuse mode is unchanged."""
+    memory.free_g = 40
+    await manager.ensure_loaded("qwen")
+    manager.request_started()
+    with pytest.raises(ModelSwitchBusy):
+        await manager.ensure_loaded("gemma")
+    manager.request_finished()
