@@ -1,5 +1,5 @@
 @echo off
-rem llm-gateway Windows 启动示例（或使用 NSSM 注册为服务）
+rem llm-gateway Windows launcher example (or register with NSSM as a service)
 cd /d %~dp0..
 set PYTHONPATH=%CD%\.deps;%CD%
 python -m llm_gateway --config config.yaml
