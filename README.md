@@ -160,8 +160,8 @@ Streaming requests get `stream_options.include_usage=true` injected automaticall
 
 | Method | Path | Behavior |
 |---|---|---|
-| GET | `/gateway/status` | state machine + active requests + idle seconds + memory (vram/ram) |
-| GET | `/gateway/models` | registry + per-model loaded state |
+| GET | `/gateway/status` | state machine + active requests + idle seconds + memory (vram/ram) + `max_context_tokens` (real KV capacity of the loaded model, probed at load time — the configured `--context-length` is only a declaration; the real limit differs per machine, e.g. ~158K tokens for a 27B dense FP8 on 48G) |
+| GET | `/gateway/models` | registry + per-model loaded state + `max_context_tokens` (only for the loaded model; `null` until it has been loaded once) |
 | POST | `/gateway/stop` | graceful unload — accepted in any state while idle (cancels an in-flight start/switch); 503 when busy |
 | POST | `/gateway/force-stop` | unconditional teardown (cuts in-flight streaming); use to reclaim resources |
 | POST | `/gateway/preload/{model}` | warm a model and return when ready |

@@ -66,6 +66,9 @@ class ModelManager:
         self._switch_future: asyncio.Future | None = None
 
         self.active_requests = 0
+        # Real KV-pool capacity (tokens) of the loaded backend, probed once
+        # after a successful load. None while stopped.
+        self.max_context_tokens: int | None = None
         self.last_activity: float = self._clock()
         self.started_at: float = self._clock()
         self._watchdog_task: asyncio.Task | None = None
@@ -96,6 +99,7 @@ class ModelManager:
     def _force_stopped(self) -> None:
         self.state = State.STOPPED
         self.current_model = None
+        self.max_context_tokens = None
         self._starting_model = None
         self._switch_from = None
         self._switch_to = None
@@ -281,6 +285,12 @@ class ModelManager:
         self.current_model = spec.name
         self._starting_model = None
         self.last_activity = self._now()
+        try:
+            self.max_context_tokens = await self.runner.get_max_total_num_tokens()
+            if self.max_context_tokens:
+                logger.info("model %s ready, real max context = %d tokens", spec.name, self.max_context_tokens)
+        except Exception:  # noqa: BLE001 - probing must never break the load
+            self.max_context_tokens = None
         self._resolve(self._start_future, None)
         logger.info("model %s ready", spec.name)
 
@@ -373,6 +383,13 @@ class ModelManager:
         self._switch_from = None
         self._switch_to = None
         self.last_activity = self._now()
+        try:
+            self.max_context_tokens = await self.runner.get_max_total_num_tokens()
+            if self.max_context_tokens:
+                logger.info("switch complete: %s -> %s, real max context = %d tokens",
+                            from_model, spec.name, self.max_context_tokens)
+        except Exception:  # noqa: BLE001 - probing must never break the load
+            self.max_context_tokens = None
         self._resolve(self._switch_future, None)
         logger.info("switch complete: %s -> %s", from_model, spec.name)
 
@@ -542,6 +559,7 @@ class ModelManager:
             "idle_seconds": round(self.idle_seconds, 1),
             "idle_timeout_seconds": self.cfg.idle.timeout_seconds,
             "uptime_seconds": round(self._now() - self.started_at, 1),
+            "max_context_tokens": self.max_context_tokens,
             "memory": memory_info,
         }
 
@@ -556,6 +574,11 @@ class ModelManager:
                     "required_ram_gib": spec.required_ram_gib,
                     "extra_args": spec.backend.extra_args,
                     "loaded": self.state is State.RUNNING and self.current_model == name,
+                    "max_context_tokens": (
+                        self.max_context_tokens
+                        if self.state is State.RUNNING and self.current_model == name
+                        else None
+                    ),
                 }
             )
         return out

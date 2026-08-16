@@ -377,5 +377,23 @@ async def test_status_shape(manager, memory, runner):
     assert status["switch_to"] is None
     assert status["active_requests"] == 0
     assert status["idle_timeout_seconds"] == 3600
+    assert status["max_context_tokens"] == 123456  # real KV capacity probed at load
     assert status["memory"]["vram_free_gib"] == 40
     assert status["memory"]["vram_total_gib"] == 48
+    # per-model registry view: loaded model carries the number, others None
+    ms = {m["name"]: m for m in manager.models_status()}
+    assert ms["qwen"]["max_context_tokens"] == 123456
+    assert ms["gemma"]["max_context_tokens"] is None  # unknown until loaded
+    # unloaded -> None everywhere
+    await manager.stop()
+    assert manager.status()["max_context_tokens"] is None
+    assert all(m["max_context_tokens"] is None for m in manager.models_status())
+
+
+async def test_context_probe_failure_is_benign(manager, memory, runner):
+    """If the backend has no probe endpoint, the load must still succeed."""
+    memory.free_g = 40
+    runner.max_tokens_capacity = None
+    await manager.ensure_loaded("qwen")
+    assert manager.state is State.RUNNING
+    assert manager.max_context_tokens is None

@@ -247,5 +247,48 @@ class BackendRunner:
                 raise
         logger.info("backend stopped (pid=%d)", proc.pid)
 
+    async def get_max_total_num_tokens(self) -> int | None:
+        """Query the backend for its real KV-pool capacity (tokens).
+
+        The configured ``--context-length`` is the *declared* maximum; the
+        actual capacity is decided at load time from the machine's memory
+        (weights + mem_fraction + free VRAM/RAM) and differs per machine —
+        e.g. 158,874 on a 48G card for a 27B dense FP8 model.  Snapshot at
+        load time; returns ``None`` when unreachable or not parseable.
+        """
+
+        for path in ("/server_info", "/get_server_info"):
+            try:
+                resp = await self._http.get(f"{self.cfg.base_url}{path}")
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+            except Exception:  # noqa: BLE001 - probing must never break serving
+                continue
+            found = self._find_int(data, "max_total_num_tokens")
+            if found is None:
+                found = self._find_int(data, "context_length")
+            if found is not None:
+                return found
+        return None
+
+    @staticmethod
+    def _find_int(obj, key: str) -> int | None:
+        """Recursively look for ``key`` with an int value in a JSON tree."""
+
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k == key and isinstance(v, int):
+                    return v
+                found = BackendRunner._find_int(v, key)
+                if found is not None:
+                    return found
+        elif isinstance(obj, list):
+            for item in obj:
+                found = BackendRunner._find_int(item, key)
+                if found is not None:
+                    return found
+        return None
+
     async def aclose(self) -> None:
         await self._http.aclose()

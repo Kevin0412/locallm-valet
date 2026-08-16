@@ -128,7 +128,7 @@ async function loadModels() {
     const s = await (await authedFetch('/gateway/status')).json();
     const chip = $('stateChip');
     chip.textContent = s.state === 'running'
-      ? '🟢 ' + s.state + ' · ' + s.model
+      ? '🟢 ' + s.state + ' · ' + s.model + (s.max_context_tokens ? ' · ctx ' + Number(s.max_context_tokens).toLocaleString('zh-CN') : '')
       : '⚪ ' + s.state;
     chip.className = 'chip ' + (s.state === 'running' ? 'ok' : '');
   } catch (e) { /* manager endpoints always up */ }

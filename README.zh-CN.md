@@ -174,8 +174,8 @@ models:
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/gateway/status` | 状态机 + 活跃请求 + idle 秒数 + 内存（vram/ram） |
-| GET | `/gateway/models` | registry + 每个模型的加载状态 |
+| GET | `/gateway/status` | 状态机 + 活跃请求 + idle 秒数 + 内存（vram/ram）+ `max_context_tokens`（已加载模型的真实 KV 容量，加载时实测——配置的 `--context-length` 只是声明，真实上限因机器而异，例如 48G 卡上 27B 稠密 FP8 约 15.8 万 tokens） |
+| GET | `/gateway/models` | registry + 每个模型的加载状态 + `max_context_tokens`（仅已加载模型有值；加载过才知道） |
 | POST | `/gateway/stop` | 正常关闭——空闲时任意状态接受（含取消进行中的启动/切换）；忙时 503 |
 | POST | `/gateway/force-stop` | 强制关闭——无条件清理（切断活跃流式连接），用于抢回资源 |
 | POST | `/gateway/preload/{model}` | 提前暖模型，等 ready |

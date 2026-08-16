@@ -64,6 +64,7 @@ class FakeRunner:
         self.on_exit = None
         self.memory: FakeMemory | None = None  # optional: set VRAM after stop
         self.free_after_stop: float | None = None
+        self.max_tokens_capacity: int | None = 123456
 
     @property
     def running(self) -> bool:
@@ -89,6 +90,9 @@ class FakeRunner:
         self.model = None
         if self.free_after_stop is not None and self.memory is not None:
             self.memory.free_g = self.free_after_stop
+
+    async def get_max_total_num_tokens(self) -> int | None:
+        return self.max_tokens_capacity
 
     async def aclose(self) -> None:
         return None
