@@ -1,15 +1,15 @@
-"""Configuration loading & validation for llm-gateway.
+"""Configuration loading & validation for locallm-valet.
 
 All knobs live in a YAML file (default ``config.yaml``, override with
-``--config`` or the ``LLM_GATEWAY_CONFIG`` env var).  High-value settings can
+``--config`` or the ``LOCALLM_VALET_CONFIG`` env var).  High-value settings can
 be overridden through environment variables (legacy ``SGLANG_MANAGER_*``
 names are still accepted as fallbacks):
 
-- ``LLM_GATEWAY_IDLE_TIMEOUT_SECONDS`` — idle auto-unload timeout (never
+- ``LOCALLM_VALET_IDLE_TIMEOUT_SECONDS`` — idle auto-unload timeout (never
   hardcoded; YAML default is 3600 s).
-- ``LLM_GATEWAY_PORT`` / ``LLM_GATEWAY_HOST`` — manager listen address.
-- ``LLM_GATEWAY_API_KEY`` — comma-separated Bearer API keys.
-- ``LLM_GATEWAY_CONFIG`` — config file path.
+- ``LOCALLM_VALET_PORT`` / ``LOCALLM_VALET_HOST`` — manager listen address.
+- ``LOCALLM_VALET_API_KEY`` — comma-separated Bearer API keys.
+- ``LOCALLM_VALET_CONFIG`` — config file path.
 
 The managed backend is backend-agnostic: ``backend.command_template`` is a
 shell-style template (placeholders ``{python} {model_path} {host} {port}
@@ -210,8 +210,8 @@ def _parse_model(name: str, raw: Any) -> ModelSpec:
     )
 
 
-def _env_float(name: str, legacy_name: str, default: float) -> float:
-    value = os.environ.get(name) or os.environ.get(legacy_name)
+def _env_float(name: str, legacy_names: tuple[str, ...], default: float) -> float:
+    value = _env_first(name, legacy_names)
     if value is None:
         return default
     try:
@@ -220,8 +220,8 @@ def _env_float(name: str, legacy_name: str, default: float) -> float:
         raise ConfigError(f"env {name}: not a number: {value!r}") from None
 
 
-def _env_int(name: str, legacy_name: str, default: int) -> int:
-    value = os.environ.get(name) or os.environ.get(legacy_name)
+def _env_int(name: str, legacy_names: tuple[str, ...], default: int) -> int:
+    value = _env_first(name, legacy_names)
     if value is None:
         return default
     try:
@@ -230,13 +230,23 @@ def _env_int(name: str, legacy_name: str, default: int) -> int:
         raise ConfigError(f"env {name}: not an integer: {value!r}") from None
 
 
+def _env_first(name: str, legacy_names: tuple[str, ...]) -> str | None:
+    """Primary env name, then deprecated aliases from earlier project names
+    (kept as functional migration aids)."""
+    for candidate in (name, *legacy_names):
+        value = os.environ.get(candidate)
+        if value is not None:
+            return value
+    return None
+
+
 def load_config(path: str | Path | None = None) -> Config:
     """Load and validate configuration from a YAML file (plus env overrides)."""
     if path is None:
-        path = os.environ.get("LLM_GATEWAY_CONFIG") or os.environ.get("SGLANG_MANAGER_CONFIG", "config.yaml")
+        path = _env_first("LOCALLM_VALET_CONFIG", ("LLM_GATEWAY_CONFIG", "SGLANG_MANAGER_CONFIG")) or "config.yaml"
     cfg_path = Path(path)
     if not cfg_path.exists():
-        raise ConfigError(f"config file not found: {cfg_path} (set LLM_GATEWAY_CONFIG or pass --config)")
+        raise ConfigError(f"config file not found: {cfg_path} (set LOCALLM_VALET_CONFIG or pass --config)")
 
     try:
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -318,11 +328,17 @@ def load_config(path: str | Path | None = None) -> Config:
 
     # Environment overrides win over the YAML file (legacy names fall back).
     cfg.idle.timeout_seconds = _env_float(
-        "LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS", cfg.idle.timeout_seconds
+        "LOCALLM_VALET_IDLE_TIMEOUT_SECONDS",
+        ("LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS"),
+        cfg.idle.timeout_seconds,
     )
-    cfg.server.port = _env_int("LLM_GATEWAY_PORT", "SGLANG_MANAGER_PORT", cfg.server.port)
-    cfg.server.host = os.environ.get("LLM_GATEWAY_HOST") or os.environ.get("SGLANG_MANAGER_HOST", cfg.server.host)
-    env_api_key = os.environ.get("LLM_GATEWAY_API_KEY") or os.environ.get("SGLANG_MANAGER_API_KEY")
+    cfg.server.port = _env_int(
+        "LOCALLM_VALET_PORT", ("LLM_GATEWAY_PORT", "SGLANG_MANAGER_PORT"), cfg.server.port
+    )
+    cfg.server.host = _env_first(
+        "LOCALLM_VALET_HOST", ("LLM_GATEWAY_HOST", "SGLANG_MANAGER_HOST")
+    ) or cfg.server.host
+    env_api_key = _env_first("LOCALLM_VALET_API_KEY", ("LLM_GATEWAY_API_KEY", "SGLANG_MANAGER_API_KEY"))
     if env_api_key:
         cfg.server.api_keys = [k.strip() for k in env_api_key.split(",") if k.strip()]
 

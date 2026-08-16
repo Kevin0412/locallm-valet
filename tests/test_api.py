@@ -8,10 +8,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pytest_asyncio import fixture as async_fixture
 
-from llm_gateway.api import create_app
-from llm_gateway.errors import BackendStartupTimeout
-from llm_gateway.manager import ModelManager
-from llm_gateway.proxy import Proxy
+from locallm_valet.api import create_app
+from locallm_valet.errors import BackendStartupTimeout
+from locallm_valet.manager import ModelManager
+from locallm_valet.proxy import Proxy
 
 from .conftest import FakeMemory, FakeRunner, make_config
 
@@ -19,7 +19,7 @@ from .conftest import FakeMemory, FakeRunner, make_config
 def test_forward_headers_strips_content_length():
     """A stale content-length must never reach the upstream after a body
     rewrite (real HTTP/1.1 would fail the request)."""
-    from llm_gateway.proxy import _forward_headers
+    from locallm_valet.proxy import _forward_headers
 
     out = _forward_headers(
         {

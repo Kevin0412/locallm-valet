@@ -6,11 +6,11 @@ import pytest
 from fastapi import Request
 from pytest_asyncio import fixture as async_fixture
 
-from llm_gateway.api import create_app
-from llm_gateway.errors import InvalidRequest
-from llm_gateway.manager import ModelManager
-from llm_gateway.proxy import Proxy
-from llm_gateway.usage import SseUsageScanner, UsageRecorder, extract_usage_from_json
+from locallm_valet.api import create_app
+from locallm_valet.errors import InvalidRequest
+from locallm_valet.manager import ModelManager
+from locallm_valet.proxy import Proxy
+from locallm_valet.usage import SseUsageScanner, UsageRecorder, extract_usage_from_json
 
 from .conftest import FakeMemory, FakeRunner, make_config
 from .test_api import make_upstream_app

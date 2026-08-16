@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "llm-gateway"
-version = "0.4.0"
-description = "Backend-agnostic LLM lifecycle gateway: on-demand start/switch of a single inference backend (SGLang / vLLM / llama.cpp / OpenVINO ...) via the OpenAI API `model` field, VRAM+RAM gating, idle auto-unload, fixed client-facing endpoint."
+name = "locallm-valet"
+version = "0.5.0"
+description = "locallm-valet: a local LLM valet — on-demand start/switch/unload of a single inference backend (SGLang / vLLM / llama.cpp / OpenVINO ...) on your own machine via the OpenAI API `model` field, with VRAM+RAM gating."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -25,10 +25,10 @@ dev = [
 ]
 
 [project.scripts]
-llm-gateway = "llm_gateway.__main__:main"
+locallm-valet = "locallm_valet.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["llm_gateway*"]
+include = ["locallm_valet*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

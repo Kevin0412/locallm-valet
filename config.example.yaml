@@ -1,4 +1,4 @@
-# llm-gateway configuration example — backend-agnostic
+# locallm-valet configuration example — a local LLM valet
 # (SGLang / vLLM / llama.cpp / OpenVINO ...)
 # Copy to config.yaml and adjust. See README.md / README.zh-CN.md.
 
@@ -7,7 +7,7 @@ server:
   port: 8000          # the only client-facing entry (OpenAI-compatible)
   # API-key auth: when set, every /v1/* and /gateway/* data endpoint requires
   # `Authorization: Bearer <key>` (401 otherwise). A list of keys is allowed.
-  # Unset = open access. Env: LLM_GATEWAY_API_KEY (comma-separated).
+  # Unset = open access. Env: LOCALLM_VALET_API_KEY (comma-separated).
   # api_key: sk-your-key-here
 
 backend:
@@ -54,7 +54,7 @@ memory:
 # Idle auto-unload (configurable, never hardcoded):
 #   state==RUNNING and active_requests==0 and now-last_activity >= timeout_seconds
 #   -> stop the backend and release resources.
-# Env override: LLM_GATEWAY_IDLE_TIMEOUT_SECONDS=1800
+# Env override: LOCALLM_VALET_IDLE_TIMEOUT_SECONDS=1800
 idle:
   timeout_seconds: 3600
   check_interval_seconds: 15

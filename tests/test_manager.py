@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from llm_gateway.errors import (
+from locallm_valet.errors import (
     MemoryUnavailable,
     InsufficientMemory,
     ModelNotFound,
@@ -13,8 +13,8 @@ from llm_gateway.errors import (
     BackendStartupTimeout,
     BackendUnavailable,
 )
-from llm_gateway.manager import ModelManager
-from llm_gateway.state import State
+from locallm_valet.manager import ModelManager
+from locallm_valet.state import State
 
 from .conftest import FakeMemory, make_config
 

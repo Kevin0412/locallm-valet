@@ -1,10 +1,10 @@
-# llm-gateway
+# locallm-valet
 
 **English** | [简体中文](README.zh-CN.md)
 
-A backend-agnostic **LLM lifecycle gateway**: on a single device with a single active model, it manages **any OpenAI-compatible inference backend** — SGLang / vLLM / llama.cpp / OpenVINO / ...
+A **local LLM valet**: it parks (unloads) your model when idle and brings it back on demand. On a single device with a single active model, it manages **any OpenAI-compatible inference backend on your own machine** — SGLang / vLLM / llama.cpp / OpenVINO / ...
 
-> Start and switch models on demand driven by the OpenAI API `model` field; route directly when the backend is running with the matching model; start only when VRAM/RAM is sufficient; refuse switches while the model is busy; fail fast when resources are insufficient; auto-unload after a configurable idle period (default 1 hour) to release resources.
+> Like a valet parking your car: when the model isn't needed, it is unloaded and the GPU/CPU/NPU is returned to you; when a request arrives, the model is started (only if VRAM/RAM is sufficient), health-checked and served — all driven by the OpenAI API `model` field. Switches are refused while the model is busy, and after a configurable idle period (default 1 hour) the model is parked again automatically.
 
 Clients always talk to one fixed endpoint:
 
@@ -27,7 +27,7 @@ client.chat.completions.create(model="llama3.1-8b", messages=[...])  # automatic
 - **Resource-aware**: dual gates — GPU VRAM (NVML, skipped automatically when no NVIDIA driver) + system RAM (psutil, cross-platform). Never hard-start into an OOM.
 - **No preemption**: switching is refused while requests are in flight — streaming connections are never cut (unless you force-stop).
 - **Formal state machine** (`STOPPED / STARTING / RUNNING / STOPPING / SWITCHING`) with a global lifecycle lock; racing requests can never start two backends.
-- **Idle watchdog**: auto-unload after a configurable idle timeout (default 1 hour, never hardcoded — YAML or `LLM_GATEWAY_IDLE_TIMEOUT_SECONDS`).
+- **Idle watchdog**: auto-unload after a configurable idle timeout (default 1 hour, never hardcoded — YAML or `LOCALLM_VALET_IDLE_TIMEOUT_SECONDS`).
 - **Token usage tracking**: per-request tokens (plain + streaming) recorded to SQLite, with a built-in usage dashboard.
 - **API-key auth**: optional `Authorization: Bearer` gate for all data endpoints.
 - **Windows-friendly**: pure asyncio, no Unix-only dependencies; RAM gating works on CPU/NPU machines (e.g. Intel Core Ultra + OpenVINO).
@@ -39,7 +39,7 @@ Client
   │
   │ OpenAI-compatible API (fixed endpoint :8000)
   ▼
-llm-gateway :8000
+locallm-valet :8000
   │
   ├── request routing (by `model` field)
   ├── state machine STOPPED/STARTING/RUNNING/STOPPING/SWITCHING
@@ -61,9 +61,10 @@ llm-gateway :8000
 
 ```bash
 pip install -e ".[dev]"
+# or: pip install locallm-valet
 cp config.example.yaml config.yaml      # then edit
-python -m llm_gateway --config config.yaml
-# or: llm-gateway --config config.yaml
+python -m locallm_valet --config config.yaml
+# or: locallm-valet --config config.yaml
 ```
 
 ```bash
@@ -142,7 +143,7 @@ model needs RAM  32G + 4G margin = 36G; available 34G ✗ 503 insufficient_memor
 
 | Port | Bind | Purpose | Config |
 |---|---|---|---|
-| **8000** | `0.0.0.0` (default) | the only client-facing entry (OpenAI API + management) | `server.port` / `LLM_GATEWAY_PORT` |
+| **8000** | `0.0.0.0` (default) | the only client-facing entry (OpenAI API + management) | `server.port` / `LOCALLM_VALET_PORT` |
 | **30000** | `127.0.0.1` (default) | internal backend port, reachable only from the gateway | `backend.port` |
 
 ### OpenAI-compatible surface (client-facing, API-key protected)
@@ -171,7 +172,7 @@ Streaming requests get `stream_options.include_usage=true` injected automaticall
 
 ### API-key auth
 
-Set `server.api_key` (string or list) or `LLM_GATEWAY_API_KEY` (comma-separated). All `/v1/*` and `/gateway/*` data endpoints then require `Authorization: Bearer <key>` (401 `authentication_error` otherwise). Exempt: `/docs`, `/redoc`, `/openapi.json`, `/gateway/dashboard` (static shell; the page prompts for the key on 401). **No key configured = open access.**
+Set `server.api_key` (string or list) or `LOCALLM_VALET_API_KEY` (comma-separated). All `/v1/*` and `/gateway/*` data endpoints then require `Authorization: Bearer <key>` (401 `authentication_error` otherwise). Exempt: `/docs`, `/redoc`, `/openapi.json`, `/gateway/dashboard` (static shell; the page prompts for the key on 401). **No key configured = open access.**
 
 ## State machine & concurrency
 
@@ -229,7 +230,7 @@ usage:    # SQLite token tracking + dashboard (enabled / db_path)
 models:   # per model: path, required_vram_gib, required_ram_gib, backend.extra_args/env
 ```
 
-Env overrides: `LLM_GATEWAY_CONFIG`, `LLM_GATEWAY_HOST`, `LLM_GATEWAY_PORT`, `LLM_GATEWAY_API_KEY`, `LLM_GATEWAY_IDLE_TIMEOUT_SECONDS`. Config sections and env variables from pre-0.4 versions are still accepted as deprecated aliases for a smooth migration (see `llm_gateway/config.py`).
+Env overrides: `LOCALLM_VALET_CONFIG`, `LOCALLM_VALET_HOST`, `LOCALLM_VALET_PORT`, `LOCALLM_VALET_API_KEY`, `LOCALLM_VALET_IDLE_TIMEOUT_SECONDS`. Env variables and config sections from earlier project names are still accepted as deprecated aliases for a smooth migration (see `locallm_valet/config.py`).
 
 ## Windows support
 
@@ -237,19 +238,20 @@ Env overrides: `LLM_GATEWAY_CONFIG`, `LLM_GATEWAY_HOST`, `LLM_GATEWAY_PORT`, `LL
 - `terminate()` is already a hard kill on Windows; the SIGTERM→SIGKILL escalation flow still works.
 - Templates accept `.exe` paths directly (quote paths with spaces).
 - No NVIDIA driver (Intel CPU/NPU) → VRAM gate skipped, RAM gate active.
-- Run via console, NSSM, or `deploy/llm-gateway.bat` (Linux: `deploy/llm-gateway.service`).
+- Run via console, NSSM, or `deploy/locallm-valet.bat` (Linux: `deploy/locallm-valet.service`).
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
+# or: pip install locallm-valet
 pytest -v     # 97 tests, fake memory/runner — no GPU required
 ```
 
 Layout:
 
 ```text
-llm_gateway/
+locallm_valet/
 ├── __main__.py     CLI entry
 ├── api.py          FastAPI: /v1 proxy + /gateway management + usage/dashboard + auth
 ├── config.py       YAML config (backend template / dual memory gates / legacy aliases)

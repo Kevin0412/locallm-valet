@@ -1,4 +1,4 @@
-"""Typed error hierarchy for llm-gateway.
+"""Typed error hierarchy for locallm-valet.
 
 Every failure surfaced to the client is a :class:`ManagerError` subclass with a
 stable ``error_type`` string, rendered in the OpenAI-style shape::

@@ -70,7 +70,7 @@ def create_app(
             if recorder is not None:
                 recorder.close()
 
-    app = FastAPI(title="llm-gateway", version=__version__, lifespan=lifespan)
+    app = FastAPI(title="locallm-valet", version=__version__, lifespan=lifespan)
 
     if config.server.api_keys:
         _AUTH_EXEMPT_PREFIXES = ("/docs", "/redoc", "/openapi.json")
@@ -168,7 +168,7 @@ def create_app(
         return {
             "object": "list",
             "data": [
-                {"id": name, "object": "model", "created": 0, "owned_by": "llm-gateway"}
+                {"id": name, "object": "model", "created": 0, "owned_by": "locallm-valet"}
                 for name in manager.cfg.models
             ],
         }
@@ -297,7 +297,7 @@ def _make_default_app() -> FastAPI | None:
         return None
 
 
-# For `uvicorn llm_gateway.api:app`; None until a config is available.
-# Prefer `python -m llm_gateway --config config.yaml` (or the
-# `llm-gateway` console script), which reports config errors clearly.
+# For `uvicorn locallm_valet.api:app`; None until a config is available.
+# Prefer `python -m locallm_valet --config config.yaml` (or the
+# `locallm-valet` console script), which reports config errors clearly.
 app = _make_default_app()

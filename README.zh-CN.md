@@ -1,13 +1,14 @@
-# llm-gateway
+# locallm-valet
 
 [English](README.md) | **简体中文**
 
-后端无关的 **LLM 生命周期网关**：单设备、单活动模型，
-管理**任意 OpenAI 兼容推理后端**——SGLang / vLLM / llama.cpp / OpenVINO / ...
+**本地 LLM 代客泊车**：空闲时把模型"泊"走（卸载释放显存），要用时"开"回来（按需启动）。
+单设备、单活动模型，管理**你自己机器上的任意 OpenAI 兼容推理后端**——
+SGLang / vLLM / llama.cpp / OpenVINO / ...
 
-> 根据 OpenAI API 的 `model` 字段按需启动和切换模型；后端已运行且模型匹配时直接路由，
-> 未运行时仅在**显存/内存充足**时启动，模型繁忙时拒绝切换，资源不足直接报错，
-> 并在连续空闲（默认 1 小时，**可配置**）无活跃请求后自动卸载释放资源。
+> 就像代客泊车：模型不用时被卸载，GPU/CPU/NPU 还给你；请求到来时模型被启动
+> （仅当显存/内存充足）、健康检查后开始服务——一切由 OpenAI API 的 `model` 字段驱动。
+> 模型繁忙时拒绝切换；连续空闲（默认 1 小时，**可配置**）后自动泊走。
 
 客户端永远只访问一个固定地址：
 
@@ -34,7 +35,7 @@ client.chat.completions.create(model="llama3.1-8b", messages=[...])  # 自动切
 - **正式状态机**（`STOPPED / STARTING / RUNNING / STOPPING / SWITCHING`）+ 全局
   生命周期锁：并发请求绝不可能拉起两个后端。
 - **空闲看门狗**：空闲超时自动卸载（默认 1 小时，**可配置不硬编码**——YAML 或
-  `LLM_GATEWAY_IDLE_TIMEOUT_SECONDS`）。
+  `LOCALLM_VALET_IDLE_TIMEOUT_SECONDS`）。
 - **token 用量统计**：每次请求（普通 + 流式）真实 tokens 落 SQLite，内置用量看板。
 - **API-key 认证**：可选 `Authorization: Bearer` 门禁，覆盖全部数据接口。
 - **Windows 友好**：纯 asyncio、无 Unix 专属依赖；CPU/NPU 机器（如 Intel Core Ultra
@@ -47,7 +48,7 @@ Client
   │
   │ OpenAI-compatible API (固定地址 :8000)
   ▼
-llm-gateway :8000
+locallm-valet :8000
   │
   ├── 请求路由（按 model 字段）
   ├── 状态机 STOPPED/STARTING/RUNNING/STOPPING/SWITCHING
@@ -69,9 +70,10 @@ llm-gateway :8000
 
 ```bash
 pip install -e ".[dev]"
+# 或：pip install locallm-valet
 cp config.example.yaml config.yaml      # 然后按需修改
-python -m llm_gateway --config config.yaml
-# 或：llm-gateway --config config.yaml
+python -m locallm_valet --config config.yaml
+# 或：locallm-valet --config config.yaml
 ```
 
 ```bash
@@ -154,7 +156,7 @@ models:
 
 | 端口 | 绑定 | 用途 | 配置 |
 |---|---|---|---|
-| **8000** | `0.0.0.0`（默认） | 客户端唯一入口（OpenAI API + 管理面） | `server.port` / `LLM_GATEWAY_PORT` |
+| **8000** | `0.0.0.0`（默认） | 客户端唯一入口（OpenAI API + 管理面） | `server.port` / `LOCALLM_VALET_PORT` |
 | **30000** | `127.0.0.1`（默认） | 后端内部端口，仅网关可达 | `backend.port` |
 
 ### OpenAI 兼容面（客户端用，API-key 保护）
@@ -183,7 +185,7 @@ models:
 
 ### API-key 认证
 
-配置 `server.api_key`（字符串或列表）或 `LLM_GATEWAY_API_KEY`（逗号分隔多 key）。
+配置 `server.api_key`（字符串或列表）或 `LOCALLM_VALET_API_KEY`（逗号分隔多 key）。
 之后所有 `/v1/*` 与 `/gateway/*` 数据接口要求 `Authorization: Bearer <key>`
 （否则 401 `authentication_error`）。免认证例外：`/docs`、`/redoc`、`/openapi.json`、
 `/gateway/dashboard`（静态壳，页面 401 时自动弹窗要 key）。**未配置 key = 全开**。
@@ -244,9 +246,9 @@ usage:    # SQLite token 统计 + 看板（enabled / db_path）
 models:   # 每模型：path、required_vram_gib、required_ram_gib、backend.extra_args/env
 ```
 
-环境变量覆盖：`LLM_GATEWAY_CONFIG`、`LLM_GATEWAY_HOST`、`LLM_GATEWAY_PORT`、
-`LLM_GATEWAY_API_KEY`、`LLM_GATEWAY_IDLE_TIMEOUT_SECONDS`。
-0.4 之前的配置段与环境变量名仍作为弃用别名兼容，便于平滑迁移（见 `llm_gateway/config.py`）。
+环境变量覆盖：`LOCALLM_VALET_CONFIG`、`LOCALLM_VALET_HOST`、`LOCALLM_VALET_PORT`、
+`LOCALLM_VALET_API_KEY`、`LOCALLM_VALET_IDLE_TIMEOUT_SECONDS`。
+更早项目名下的环境变量与配置段仍作为弃用别名兼容，便于平滑迁移（见 `locallm_valet/config.py`）。
 
 ## Windows 支持
 
@@ -254,19 +256,20 @@ models:   # 每模型：path、required_vram_gib、required_ram_gib、backend.ex
 - Windows 上 `terminate()` 即硬终止，SIGTERM→SIGKILL 升级流程同样有效。
 - 模板可直接写 `.exe` 路径（含空格用引号包住）。
 - 无 NVIDIA 驱动（Intel CPU/NPU）→ 显存检查自动跳过，RAM 检查照常。
-- 控制台 / NSSM / `deploy/llm-gateway.bat` 运行（Linux 用 `deploy/llm-gateway.service`）。
+- 控制台 / NSSM / `deploy/locallm-valet.bat` 运行（Linux 用 `deploy/locallm-valet.service`）。
 
 ## 开发
 
 ```bash
 pip install -e ".[dev]"
+# 或：pip install locallm-valet
 pytest -v     # 97 个测试，fake memory/runner——无需 GPU
 ```
 
 目录结构：
 
 ```text
-llm_gateway/
+locallm_valet/
 ├── __main__.py     CLI 入口
 ├── api.py          FastAPI：/v1 代理 + /gateway 管理 + usage/看板 + API-key 认证
 ├── config.py       YAML 配置（backend 模板 / 双内存门控 / 兼容别名）

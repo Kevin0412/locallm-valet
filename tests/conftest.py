@@ -1,12 +1,12 @@
-"""Shared fakes + fixtures for llm-gateway tests (no GPU needed)."""
+"""Shared fakes + fixtures for locallm-valet tests (no GPU needed)."""
 
 from __future__ import annotations
 
 import pytest
 
-from llm_gateway.config import Config, ModelBackendArgs, ModelSpec, BackendConfig, MemoryConfig, UsageConfig
-from llm_gateway.errors import BackendStartupFailed, BackendStartupTimeout
-from llm_gateway.manager import ModelManager
+from locallm_valet.config import Config, ModelBackendArgs, ModelSpec, BackendConfig, MemoryConfig, UsageConfig
+from locallm_valet.errors import BackendStartupFailed, BackendStartupTimeout
+from locallm_valet.manager import ModelManager
 
 
 class FakeClock:

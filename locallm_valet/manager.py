@@ -228,6 +228,7 @@ class ModelManager:
             self.state = State.STARTING
             self._starting_model = spec.name
             self._start_future = asyncio.get_running_loop().create_future()
+            self._start_future.add_done_callback(self._silence_unretrieved)
 
         try:
             # VRAM is checked BEFORE launching: never hard-start into a CUDA OOM.
@@ -314,6 +315,7 @@ class ModelManager:
             self._switch_from = self.current_model
             self._switch_to = spec.name
             self._switch_future = asyncio.get_running_loop().create_future()
+            self._switch_future.add_done_callback(self._silence_unretrieved)
 
         from_model = self._switch_from
         try:
@@ -377,6 +379,15 @@ class ModelManager:
     def _fail_switch(self, exc: Exception) -> None:
         self._force_stopped()
         self._resolve(self._switch_future, exc)
+
+    @staticmethod
+    def _silence_unretrieved(fut: asyncio.Future) -> None:
+        """Retrieve a cancelled-transition exception if no request ever awaits
+        the future — otherwise asyncio logs 'Future exception was never
+        retrieved' when the future is garbage collected."""
+
+        if not fut.cancelled():
+            fut.exception()
 
     def _resolve(self, fut: asyncio.Future | None, exc: Exception | None) -> None:
         if fut is None or fut.done():

@@ -2,7 +2,7 @@
 
 import pytest
 
-from llm_gateway.config import ConfigError, DEFAULT_COMMAND_TEMPLATE, load_config
+from locallm_valet.config import ConfigError, DEFAULT_COMMAND_TEMPLATE, load_config
 
 SAMPLE = """
 server: {host: 0.0.0.0, port: 8123}
@@ -35,7 +35,8 @@ def write_sample(tmp_path, text=SAMPLE):
 
 
 def test_load_config(tmp_path, monkeypatch):
-    for var in ("LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "LLM_GATEWAY_PORT", "LLM_GATEWAY_HOST",
+    for var in ("LOCALLM_VALET_IDLE_TIMEOUT_SECONDS", "LOCALLM_VALET_PORT", "LOCALLM_VALET_HOST",
+                "LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "LLM_GATEWAY_PORT", "LLM_GATEWAY_HOST",
                 "SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS", "SGLANG_MANAGER_PORT", "SGLANG_MANAGER_HOST"):
         monkeypatch.delenv(var, raising=False)
     cfg = load_config(write_sample(tmp_path))
@@ -66,8 +67,9 @@ def test_default_command_template_is_sglang():
 
 def test_legacy_sections_still_accepted(tmp_path, monkeypatch, caplog):
     """Old sglang:/gpu: section names must keep working (deprecated)."""
-    for var in ("LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS",
-                "LLM_GATEWAY_PORT", "SGLANG_MANAGER_PORT"):
+    for var in ("LOCALLM_VALET_IDLE_TIMEOUT_SECONDS", "LLM_GATEWAY_IDLE_TIMEOUT_SECONDS",
+                "SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS",
+                "LOCALLM_VALET_PORT", "LLM_GATEWAY_PORT", "SGLANG_MANAGER_PORT"):
         monkeypatch.delenv(var, raising=False)
     legacy = SAMPLE.replace("backend:", "sglang:").replace("memory:", "gpu:")
     cfg = load_config(write_sample(tmp_path, legacy))
@@ -87,23 +89,34 @@ def test_legacy_command_list_rejected(tmp_path):
 
 def test_idle_timeout_env_override(tmp_path, monkeypatch):
     """The idle timeout must be overridable, never hardcoded."""
-    monkeypatch.setenv("LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "1800")
-    monkeypatch.setenv("LLM_GATEWAY_PORT", "9000")
+    monkeypatch.setenv("LOCALLM_VALET_IDLE_TIMEOUT_SECONDS", "1800")
+    monkeypatch.setenv("LOCALLM_VALET_PORT", "9000")
     cfg = load_config(write_sample(tmp_path))
     assert cfg.idle.timeout_seconds == 1800
     assert cfg.server.port == 9000
 
 
-def test_legacy_env_names_fallback(tmp_path, monkeypatch):
-    """Old SGLANG_MANAGER_* env names still work as fallbacks."""
+def test_legacy_env_names_fallback_chain(tmp_path, monkeypatch):
+    """Both earlier project-name env vars still work as fallbacks:
+    LOCALLM_VALET_* -> LLM_GATEWAY_* -> SGLANG_MANAGER_*."""
+    monkeypatch.delenv("LOCALLM_VALET_IDLE_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", raising=False)
     monkeypatch.setenv("SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS", "2700")
     cfg = load_config(write_sample(tmp_path))
     assert cfg.idle.timeout_seconds == 2700
 
+    monkeypatch.delenv("SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "2400")
+    cfg = load_config(write_sample(tmp_path))
+    assert cfg.idle.timeout_seconds == 2400
+
+    monkeypatch.setenv("LOCALLM_VALET_IDLE_TIMEOUT_SECONDS", "1800")
+    cfg = load_config(write_sample(tmp_path))
+    assert cfg.idle.timeout_seconds == 1800  # primary wins
+
 
 def test_idle_timeout_env_bad_value(tmp_path, monkeypatch):
-    monkeypatch.setenv("LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "abc")
+    monkeypatch.setenv("LOCALLM_VALET_IDLE_TIMEOUT_SECONDS", "abc")
     with pytest.raises(ConfigError):
         load_config(write_sample(tmp_path))
 
@@ -134,7 +147,7 @@ def test_invalid_yaml(tmp_path):
 
 
 def test_api_key_string(tmp_path, monkeypatch):
-    monkeypatch.delenv("LLM_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALLM_VALET_API_KEY", raising=False)
     monkeypatch.delenv("SGLANG_MANAGER_API_KEY", raising=False)
     cfg = load_config(write_sample(tmp_path, SAMPLE.replace(
         "server: {host: 0.0.0.0, port: 8123}",
@@ -144,7 +157,7 @@ def test_api_key_string(tmp_path, monkeypatch):
 
 
 def test_api_key_list(tmp_path, monkeypatch):
-    monkeypatch.delenv("LLM_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALLM_VALET_API_KEY", raising=False)
     monkeypatch.delenv("SGLANG_MANAGER_API_KEY", raising=False)
     cfg = load_config(write_sample(tmp_path, SAMPLE.replace(
         "server: {host: 0.0.0.0, port: 8123}",
@@ -154,13 +167,13 @@ def test_api_key_list(tmp_path, monkeypatch):
 
 
 def test_api_key_env_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("LLM_GATEWAY_API_KEY", "sk-env-1, sk-env-2")
+    monkeypatch.setenv("LOCALLM_VALET_API_KEY", "sk-env-1, sk-env-2")
     cfg = load_config(write_sample(tmp_path))
     assert cfg.server.api_keys == ["sk-env-1", "sk-env-2"]
 
 
 def test_api_key_invalid_type(tmp_path, monkeypatch):
-    monkeypatch.delenv("LLM_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALLM_VALET_API_KEY", raising=False)
     monkeypatch.delenv("SGLANG_MANAGER_API_KEY", raising=False)
     with pytest.raises(ConfigError, match="api_key"):
         load_config(write_sample(tmp_path, SAMPLE.replace(
@@ -172,7 +185,7 @@ def test_api_key_invalid_type(tmp_path, monkeypatch):
 def test_per_model_backend_overrides(tmp_path, monkeypatch):
     """Per-model command_template / health_path are parsed and fall back to
     the global backend.* settings when absent."""
-    for var in ("LLM_GATEWAY_IDLE_TIMEOUT_SECONDS", "SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS"):
+    for var in ("LOCALLM_VALET_IDLE_TIMEOUT_SECONDS", "SGLANG_MANAGER_IDLE_TIMEOUT_SECONDS"):
         monkeypatch.delenv(var, raising=False)
     lines = [
         "      command_template: llama-server -m {model_path} {extra_args}",

@@ -1,18 +1,18 @@
 [Unit]
-Description=llm-gateway: backend-agnostic LLM lifecycle gateway
+Description=locallm-valet: a local LLM valet (backend lifecycle gateway)
 After=network.target
 
 [Service]
 Type=simple
-User=llm-gateway
-WorkingDirectory=/opt/llm-gateway
+User=locallm-valet
+WorkingDirectory=/opt/locallm-valet
 # The gateway stays up; the inference backend is spawned on demand by the
 # gateway itself (no separate service unit needed).
-ExecStart=/opt/llm-gateway/.venv/bin/python -m llm_gateway --config /opt/llm-gateway/config.yaml
+ExecStart=/opt/locallm-valet/.venv/bin/python -m locallm_valet --config /opt/locallm-valet/config.yaml
 Restart=always
 RestartSec=5
 # Optional: override the idle timeout from the environment (never hardcoded)
-# Environment=LLM_GATEWAY_IDLE_TIMEOUT_SECONDS=1800
+# Environment=LOCALLM_VALET_IDLE_TIMEOUT_SECONDS=1800
 
 [Install]
 WantedBy=multi-user.target

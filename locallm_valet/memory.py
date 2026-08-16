@@ -15,7 +15,7 @@ Start feasibility is computed as::
 
 ``free`` is always re-read *after* the previous backend has exited and memory
 has been observed to come back, so decisions reflect reality, not estimates.
-llm-gateway only reads these numbers — it never touches processes it does not
+locallm-valet only reads these numbers — it never touches processes it does not
 own.
 """
 

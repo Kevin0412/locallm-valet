@@ -1,4 +1,4 @@
-"""CLI entry point: ``python -m llm_gateway --config config.yaml``."""
+"""CLI entry point: ``python -m locallm_valet --config config.yaml``."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ from .config import ConfigError, load_config
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="llm-gateway",
+        prog="locallm-valet",
         description="backend-agnostic LLM lifecycle gateway (single device, single active model).",
     )
     parser.add_argument(
         "--config",
         default=None,
-        help="path to the YAML config (default: $LLM_GATEWAY_CONFIG or ./config.yaml)",
+        help="path to the YAML config (default: $LOCALLM_VALET_CONFIG or ./config.yaml)",
     )
     parser.add_argument("--host", default=None, help="listen host (overrides config)")
     parser.add_argument("--port", type=int, default=None, help="listen port (overrides config)")
