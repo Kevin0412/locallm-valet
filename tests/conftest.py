@@ -105,7 +105,7 @@ def make_config(**kwargs) -> Config:
     cfg = Config()
     cfg.models["qwen"] = ModelSpec(
         name="qwen", path="/models/qwen", required_vram_gib=30, required_ram_gib=20,
-        backend=ModelBackendArgs(extra_args=["--flag-a"]),
+        backend=ModelBackendArgs(extra_args=["--flag-a", "--context-length", "262144"]),
     )
     cfg.models["gemma"] = ModelSpec(
         name="gemma", path="/models/gemma", required_vram_gib=18, required_ram_gib=10,

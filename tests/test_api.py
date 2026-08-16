@@ -121,11 +121,21 @@ async def test_second_request_routes_without_restart(stack):
 
 
 async def test_get_models_lists_registry(stack):
-    client, *_ = stack
+    client, manager, runner, memory = stack
     resp = await client.get("/v1/models")
     assert resp.status_code == 200
-    ids = {m["id"] for m in resp.json()["data"]}
-    assert ids == {"qwen", "gemma"}
+    by_id = {m["id"]: m for m in resp.json()["data"]}
+    assert set(by_id) == {"qwen", "gemma"}
+    # declared context always visible; real capacity only once loaded
+    assert by_id["qwen"]["context_length"] == 262144
+    assert by_id["qwen"]["max_context_tokens"] is None  # not loaded yet
+    memory.free_g = 40
+    await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
+    resp = await client.get("/v1/models")
+    by_id = {m["id"]: m for m in resp.json()["data"]}
+    assert by_id["qwen"]["max_context_tokens"] == 123456  # real capacity
+    assert by_id["gemma"]["max_context_tokens"] is None   # unknown until loaded
+    assert by_id["qwen"]["context_length"] == 262144
 
 
 async def test_unknown_model_404(stack):

@@ -69,6 +69,18 @@ class ModelSpec:
     required_ram_gib: float = 0.0   # system RAM (psutil, cross-platform)
     backend: ModelBackendArgs = field(default_factory=ModelBackendArgs)
 
+    def configured_context_length(self) -> int | None:
+        """The declared ``--context-length`` from extra_args, if present."""
+
+        args = self.backend.extra_args
+        for i, a in enumerate(args):
+            if a == "--context-length" and i + 1 < len(args):
+                try:
+                    return int(args[i + 1])
+                except ValueError:
+                    return None
+        return None
+
 
 @dataclass
 class ServerConfig:

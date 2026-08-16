@@ -151,7 +151,7 @@ model needs RAM  32G + 4G margin = 36G; available 34G ✗ 503 insufficient_memor
 | Method | Path | Behavior |
 |---|---|---|
 | POST | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, any `/v1/*` | gated on the `model` field (start / switch / direct route) then forwarded verbatim, SSE included |
-| GET | `/v1/models` | registry listing (available even while the backend is stopped) |
+| GET | `/v1/models` | registry listing (available even while the backend is stopped); each entry carries `context_length` (declared `--context-length`) and `max_context_tokens` (real KV capacity — `null` until that model has been loaded once) |
 | GET | other `/v1/*` | forwarded only when a model is loaded |
 
 Streaming requests get `stream_options.include_usage=true` injected automatically so real token counts are captured; transparent to clients.

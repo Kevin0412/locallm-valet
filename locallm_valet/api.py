@@ -165,13 +165,22 @@ def create_app(
 
     @app.get("/v1/models")
     async def list_models():
-        return {
-            "object": "list",
-            "data": [
-                {"id": name, "object": "model", "created": 0, "owned_by": "locallm-valet"}
-                for name in manager.cfg.models
-            ],
-        }
+        data = []
+        for name, spec in manager.cfg.models.items():
+            loaded = manager.state is State.RUNNING and manager.current_model == name
+            data.append(
+                {
+                    "id": name,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "locallm-valet",
+                    # Declared context (from --context-length) vs the real KV
+                    # capacity probed at load time (unknown until loaded).
+                    "context_length": spec.configured_context_length(),
+                    "max_context_tokens": manager.max_context_tokens if loaded else None,
+                }
+            )
+        return {"object": "list", "data": data}
 
     @app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     async def v1_proxy(path: str, request: Request):

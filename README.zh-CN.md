@@ -165,7 +165,7 @@ models:
 | 方法 | 路径 | 行为 |
 |---|---|---|
 | POST | `/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/embeddings`、任意 `/v1/*` | 按 `model` 门控（启动/切换/直通）后原样转发，含 SSE |
-| GET | `/v1/models` | registry 列表（后端停止时也可列） |
+| GET | `/v1/models` | registry 列表（后端停止时也可列）；每个条目带 `context_length`（配置声明）和 `max_context_tokens`（真实 KV 容量，未加载过为 `null`） |
 | GET | 其他 `/v1/*` | 仅当有模型已加载时转发 |
 
 流式请求自动注入 `stream_options.include_usage=true` 以捕获真实 token 数，对客户端透明。
