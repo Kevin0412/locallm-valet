@@ -229,7 +229,7 @@ usage:    # SQLite token tracking + dashboard (enabled / db_path)
 models:   # per model: path, required_vram_gib, required_ram_gib, backend.extra_args/env
 ```
 
-Env overrides: `LLM_GATEWAY_CONFIG`, `LLM_GATEWAY_HOST`, `LLM_GATEWAY_PORT`, `LLM_GATEWAY_API_KEY`, `LLM_GATEWAY_IDLE_TIMEOUT_SECONDS`. Legacy `SGLANG_MANAGER_*` names and `sglang:`/`gpu:` config sections still work as deprecated aliases.
+Env overrides: `LLM_GATEWAY_CONFIG`, `LLM_GATEWAY_HOST`, `LLM_GATEWAY_PORT`, `LLM_GATEWAY_API_KEY`, `LLM_GATEWAY_IDLE_TIMEOUT_SECONDS`. Config sections and env variables from pre-0.4 versions are still accepted as deprecated aliases for a smooth migration (see `llm_gateway/config.py`).
 
 ## Windows support
 

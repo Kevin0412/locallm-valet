@@ -2,7 +2,7 @@
 
 [English](README.md) | **简体中文**
 
-后端无关的 **LLM 生命周期网关**（原 sglang-manager，已泛化改名）：单设备、单活动模型，
+后端无关的 **LLM 生命周期网关**：单设备、单活动模型，
 管理**任意 OpenAI 兼容推理后端**——SGLang / vLLM / llama.cpp / OpenVINO / ...
 
 > 根据 OpenAI API 的 `model` 字段按需启动和切换模型；后端已运行且模型匹配时直接路由，
@@ -246,7 +246,7 @@ models:   # 每模型：path、required_vram_gib、required_ram_gib、backend.ex
 
 环境变量覆盖：`LLM_GATEWAY_CONFIG`、`LLM_GATEWAY_HOST`、`LLM_GATEWAY_PORT`、
 `LLM_GATEWAY_API_KEY`、`LLM_GATEWAY_IDLE_TIMEOUT_SECONDS`。
-旧 `SGLANG_MANAGER_*` 名称与 `sglang:`/`gpu:` 配置段仍作为弃用别名兼容。
+0.4 之前的配置段与环境变量名仍作为弃用别名兼容，便于平滑迁移（见 `llm_gateway/config.py`）。
 
 ## Windows 支持
 
