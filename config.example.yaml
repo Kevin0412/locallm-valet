@@ -70,9 +70,13 @@ models:
   # RAM gate:  32 + 4 margin = 36 < available RAM
   qwen3.6-35b:
     path: /home/test/models/modelscope/models/Qwen/Qwen3___6-35B-A3B-FP8
-    required_vram_gib: 39       # 0/omitted = no VRAM check (CPU/NPU backends;
-                                # also auto-skipped when NVML is unavailable)
-    required_ram_gib: 32        # 0/omitted = no RAM check
+    required_vram_gib: 39       # VRAM gate: the primary criterion for GPU
+                                # backends (hard failure if insufficient)
+    required_ram_gib: 0         # RAM gate is OPT-IN. GPU serving gates on
+                                # VRAM alone (swap = slow but works); set a
+                                # value here mainly for CPU/NPU backends
+                                # (llama.cpp / OpenVINO), where RAM IS the
+                                # compute resource
     backend:
       extra_args:
         - --mem-fraction-static

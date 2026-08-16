@@ -140,10 +140,11 @@ models:
 每个模型配置 `required_vram_gib`（显存）与 `required_ram_gib`（系统内存），
 门槛 = 需求 + `memory.safety_margin_gib`：
 
-- **VRAM**（NVML）：**仅当有 NVIDIA 驱动时检查**。CPU/NPU 机器（Windows + OpenVINO /
-  llama.cpp CPU）无 NVIDIA 驱动时**自动跳过显存检查**，只查 RAM——正是为
-  Intel CPU/NPU 机器准备的行为。
-- **RAM**（psutil `available`）：Linux / Windows / macOS 全平台。
+- **VRAM**（NVML）：**GPU 后端的首要门控**——显存不足直接拒绝。仅当有 NVIDIA
+  驱动时检查；CPU/NPU 机器自动跳过。
+- **RAM**（psutil `available`）：**可选**（`required_ram_gib > 0` 才检查）。主要用于
+  CPU/NPU 后端（llama.cpp / OpenVINO）——那里 RAM 才是真正的算力资源。GPU 服务
+  通常留 0：显存够就能起（内存紧只是加载慢/换页，不是不能跑）。
 - `0`（默认）= 该资源不检查。
 - 切换时以**停止旧模型后重新读取的实际资源**为准（等内存释放完再判断）。
 

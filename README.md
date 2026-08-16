@@ -129,8 +129,8 @@ Numbers in `extra_args` are coerced to strings automatically (no quoting needed)
 
 Per model: `required_vram_gib` (GPU) and `required_ram_gib` (system RAM); threshold = requirement + `memory.safety_margin_gib`.
 
-- **VRAM** (NVML): checked **only when an NVIDIA driver is present**. On CPU/NPU machines the VRAM gate is skipped automatically and only RAM is enforced — exactly what you want for Windows + OpenVINO / llama.cpp-CPU.
-- **RAM** (psutil `available`): Linux / Windows / macOS.
+- **VRAM** (NVML): the **primary gate for GPU backends** — a hard failure if insufficient. Checked only when an NVIDIA driver is present; on CPU/NPU machines it is skipped automatically.
+- **RAM** (psutil `available`): **opt-in** (`required_ram_gib > 0`). Mainly for CPU/NPU backends (llama.cpp / OpenVINO) where RAM *is* the compute resource. For GPU serving you usually leave it 0 — VRAM sufficiency is what matters; a tight RAM situation makes loading slow (swap), not impossible.
 - `0` (default) disables that gate.
 - After a switch, the decision uses the **re-read values after the old backend has exited and memory has actually settled**.
 
