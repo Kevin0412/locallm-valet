@@ -1,0 +1,43 @@
+[
+  {
+    "item_id": "smoke_01", "category": "fact",
+    "question": "What is the capital of France?\n\nA. Berlin  B. Madrid  C. Paris  D. Rome\n\nAnswer with the letter only.",
+    "ground_truth": "C",
+    "choices": ["A. Berlin", "B. Madrid", "C. Paris", "D. Rome"]
+  },
+  {
+    "item_id": "smoke_02", "category": "reasoning",
+    "question": "A is taller than B. B is taller than C. Who is the shortest?\n\nA. A  B. B  C. C  D. Cannot be determined\n\nAnswer with the letter only.",
+    "ground_truth": "C",
+    "choices": ["A. A", "B. B", "C. C", "D. Cannot be determined"]
+  },
+  {
+    "item_id": "smoke_03", "category": "math",
+    "question": "What is 12 × 15?\n\nA. 150  B. 160  C. 170  D. 180\n\nAnswer with the letter only.",
+    "ground_truth": "D",
+    "choices": ["A. 150", "B. 160", "C. 170", "D. 180"]
+  },
+  {
+    "item_id": "smoke_04", "category": "chinese",
+    "question": "鲁迅的原名是什么？\n\nA. 周作人  B. 周树人  C. 胡适  D. 茅盾\n\n只输出字母即可。",
+    "ground_truth": "B",
+    "choices": ["A. 周作人", "B. 周树人", "C. 胡适", "D. 茅盾"]
+  },
+  {
+    "item_id": "smoke_05", "category": "instruction",
+    "question": "Reply with exactly one word: Hello.",
+    "ground_truth": "Hello",
+    "choices": []
+  },
+  {
+    "item_id": "smoke_06", "category": "coding",
+    "question": "What does the Python function len() return?\n\nA. The length of an iterable  B. The square root of a number  C. The type of an object  D. The maximum value\n\nAnswer with the letter only.",
+    "ground_truth": "A",
+    "choices": [
+      "A. The length of an iterable",
+      "B. The square root of a number",
+      "C. The type of an object",
+      "D. The maximum value"
+    ]
+  }
+]

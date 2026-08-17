@@ -38,7 +38,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .bar-bg { flex:1; height:8px; background:var(--panel2); border-radius:4px; overflow:hidden; min-width:80px; }
   .bar { height:100%; background:linear-gradient(90deg, var(--accent), #7fb0ff); border-radius:4px; }
   .trend { display:flex; align-items:flex-end; gap:2px; height:120px; padding-top:8px; }
-  .trend .col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; gap:2px; min-width:0; }
+  .trend .col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; gap:2px; min-width:0; height:100%; }
   .trend .bar2 { width:70%; background:linear-gradient(180deg,#7fb0ff,var(--accent)); border-radius:3px 3px 0 0; }
   .trend .lbl { font-size:10px; color:var(--muted); transform:rotate(-45deg); transform-origin:top center; }
   .muted { color:var(--muted); }
@@ -65,6 +65,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <option value="day">按天</option>
   </select>
   <button id="refreshBtn">刷新</button>
+  <a href="/gateway/benchmark" style="font-size:13px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:5px 10px;color:var(--accent);text-decoration:none;">📊 Benchmark</a>
   <span id="refreshAt"></span>
 </header>
 

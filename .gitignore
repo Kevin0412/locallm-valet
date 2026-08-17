@@ -10,3 +10,8 @@ data/
 logs/
 *.log
 deploy/Caddyfile.new
+benchmark_results/
+dataset_cache/
+# Personal launcher scripts (machine-specific paths)
+start-valet.ps1
+stop-valet.ps1

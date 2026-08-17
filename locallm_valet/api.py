@@ -300,11 +300,135 @@ def create_app(
                 limit=max(1, min(int(limit), 500)),
             )
 
+        @app.get("/gateway/benchmark", response_class=HTMLResponse)
+        async def gateway_benchmark():
+            """Render a benchmark results page from scored JSONL files in benchmark_results/."""
+            return HTMLResponse(_render_benchmark_page())
+
         @app.get("/gateway/dashboard", response_class=HTMLResponse)
         async def gateway_dashboard():
             return HTMLResponse(DASHBOARD_HTML)
 
     return app
+
+
+# ---------------------------------------------------------------------------
+# Benchmark page rendering
+# ---------------------------------------------------------------------------
+
+def _render_benchmark_page() -> str:
+    """Scan benchmark_results/ for scored JSONL files and render an HTML page
+    with model-by-model accuracy comparison."""
+    import os
+    from pathlib import Path
+
+    results_dir = Path("benchmark_results")
+    if not results_dir.is_dir():
+        return "<html><body><h1>Benchmark</h1><p>No benchmark results yet. Run <code>python -m locallm_valet benchmark run --model &lt;name&gt;</code> to generate.</p></body></html>"
+
+    files = sorted(results_dir.glob("*_results.jsonl"))
+    if not files:
+        return "<html><body><h1>Benchmark</h1><p>No scored JSONL files found in <code>benchmark_results/</code>.</p></body></html>"
+
+    rows: list[str] = []
+    for f in files:
+        model_name = f.stem.replace("_results", "")
+        label = model_name  # human-readable, maybe improve later
+
+        total = correct = 0
+        cats: dict[str, dict] = {}
+        latencies: list[float] = []
+        tps_list: list[float] = []
+
+        for line in f.read_text(encoding="utf-8").strip().splitlines():
+            if not line:
+                continue
+            d = json.loads(line)
+            cat = d.get("category", "?")
+            is_correct = d.get("is_correct")
+            lat = d.get("latency_ms")
+            tps = d.get("tps")
+            total += 1
+            if is_correct is True:
+                correct += 1
+            if cat not in cats:
+                cats[cat] = {"total": 0, "correct": 0}
+            cats[cat]["total"] += 1
+            if is_correct is True:
+                cats[cat]["correct"] += 1
+            if lat is not None:
+                latencies.append(lat)
+            if tps is not None:
+                tps_list.append(tps)
+
+        acc = round(correct / total * 100, 1) if total else 0
+        avg_lat = round(sum(latencies) / len(latencies), 1) if latencies else "-"
+        avg_tps = round(sum(tps_list) / len(tps_list), 2) if tps_list else "-"
+
+        # Category breakdown tags
+        cat_tags = ""
+        for cat_name in ("fact", "reasoning", "math", "chinese", "instruction", "coding"):
+            if cat_name not in cats:
+                continue
+            c = cats[cat_name]
+            pct = round(c["correct"] / c["total"] * 100, 1) if c["total"] else 0
+            color = "#3ecf8e" if pct >= 60 else ("#ffb454" if pct >= 30 else "#ff6b6b")
+            cat_tags += f"<span style=\"display:inline-block;padding:1px 8px;border-radius:4px;background:{color}22;color:{color};font-size:12px;margin-right:4px\">{cat_name}&nbsp;{pct}%</span>"
+
+        rows.append(f"""<tr>
+<td style="font-weight:600">{label}</td>
+<td style="text-align:center;font-weight:700;font-size:18px">{acc}%</td>
+<td style="text-align:center">{correct}/{total}</td>
+<td>{cat_tags}</td>
+<td style="text-align:center">{avg_lat}</td>
+<td style="text-align:center">{avg_tps}</td>
+<td><a href="{f.name.replace('_results.jsonl','_report.md').replace('.jsonl','')}" style="color:var(--accent)" target="_blank">report</a></td>
+</tr>""")
+
+    # Also link to any comparison report
+    compare_link = ""
+    compare_files = list(results_dir.glob("*_comparison.md"))
+    if compare_files:
+        compare_link = f"""<p style="margin-top:16px">📊 <a href="{compare_files[-1].name}" target="_blank" style="color:var(--accent)">Cross-model comparison report</a></p>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>locallm-valet · Benchmark</title>
+<style>
+* {{box-sizing:border-box;margin:0;padding:0}}
+body {{background:#0f1115;color:#e6e8ee;font:14px/1.5 "SF Mono",Consolas,"Microsoft YaHei",monospace;padding:20px}}
+h1 {{font-size:18px;margin-bottom:12px}}
+p, ol {{margin-bottom:12px;color:#8b93a3}}
+code {{background:#1e222c;padding:1px 6px;border-radius:4px;font-size:13px}}
+a {{color:#4f8cff;text-decoration:none}}
+a:hover {{text-decoration:underline}}
+table {{width:100%;border-collapse:collapse;font-size:13px}}
+th, td {{text-align:left;padding:8px 10px;border-bottom:1px solid #262b36;white-space:nowrap}}
+th {{color:#8b93a3;font-weight:600}}
+tr:hover {{background:#171a21}}
+</style>
+</head>
+<body>
+<h1>📊 Benchmark Results</h1>
+<p>Run via <code>python -m locallm_valet benchmark run/compare --model ...</code> — see README for details.</p>
+<table>
+<thead><tr>
+<th>Model</th><th style="text-align:center">Accuracy</th><th style="text-align:center">Correct/Total</th>
+<th>Category Breakdown</th><th style="text-align:center">Avg Latency</th><th style="text-align:center">Avg TPS</th><th>Report</th>
+</tr></thead>
+<tbody>
+{''.join(rows)}
+</tbody>
+</table>
+{compare_link}
+<ol style="padding-left:20px">
+<li>Run once: <code>python -m locallm_valet benchmark run --model &lt;name&gt; --dataset builtin</code></li>
+<li>Compare across quantizations: <code>python -m locallm_valet benchmark compare --models Q4 Q8 --labels "Q4_K_M" "Q8_0"</code></li>
+<li>Refresh this page to see updated results.</li>
+</ol>
+</body>
+</html>"""
 
 
 def _make_default_app() -> FastAPI | None:
@@ -315,7 +439,23 @@ def _make_default_app() -> FastAPI | None:
         return None
 
 
-# For `uvicorn locallm_valet.api:app`; None until a config is available.
-# Prefer `python -m locallm_valet --config config.yaml` (or the
-# `locallm-valet` console script), which reports config errors clearly.
-app = _make_default_app()
+class _LazyApp:
+    """Lazy default app — only inits when accessed, so benchmark CLI
+    doesn't trigger a spurious config load on import."""
+
+    _instance: FastAPI | None = None
+
+    def __getattr__(self, name: str):
+        if self._instance is None:
+            self._instance = _make_default_app()
+            if self._instance is None:
+                raise RuntimeError(
+                    "no valid config found; use `python -m locallm_valet --config config.yaml`"
+                )
+        return getattr(self._instance, name)
+
+
+# For `uvicorn locallm_valet.api:app`; the lazy wrapper means import-time
+# side effects (config load) don't happen until uvicorn actually serves.
+# Prefer `python -m locallm_valet --config config.yaml`.
+app: FastAPI = _LazyApp()  # type: ignore[assignment]
