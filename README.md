@@ -265,6 +265,46 @@ locallm_valet/
 └── usage.py        SQLite token usage recording & aggregation
 ```
 
+## Benchmark — 一键量化质量检测
+
+验证本地模型的量化降级（Q8→Q4→Q3 精度损失）。
+
+### 单模型跑分
+
+```bash
+python -m locallm_valet benchmark run \
+  --model Qwen3-1.7B-Q8_0 \
+  --dataset builtin \
+  --base-url http://127.0.0.1:8000/v1
+
+# 结果 → benchmark_results/benchmark_<model>.md
+# 看板  → http://127.0.0.1:8000/gateway/benchmark
+```
+
+### 同模型不同量化对比
+
+```bash
+python -m locallm_valet benchmark compare \
+  --models Qwen3-1.7B-Q8_0 Qwen3-1.7B-Q4_K_M \
+  --labels "Q8_0" "Q4_K_M" \
+  --dataset builtin \
+  --base-url http://127.0.0.1:8000/v1
+
+# 结果 → benchmark_results/benchmark_comparison.md
+```
+
+### 内置数据集 (`builtin`)
+
+48 道题，覆盖 **fact / reasoning / math / chinese (中文) / instruction / coding** 六个维度。零依赖零下载，即跑即用。
+
+### 可用的模型名
+
+| GGUF (llama.cpp CPU) | OpenVINO (GPU/NPU) |
+|---|---|
+| `gemma-4-e2b`, `gemma-4-e4b`, `gemma-3-4b-it` | `qwen3-1.7b` (GPU), `qwen3-1.7b-npu` (NPU) |
+| `Qwen3-1.7B-Q8_0`, `Qwen3-1.7B-Q5_K_M`, `Qwen3-1.7B-Q4_K_M` | `llama-3.2-1b` (NPU), `qwen2.5-1.5b` (NPU) |
+| `Qwen3.5-0.8B`, `Qwen3.5-2B`, `Qwen3.5-4B` | |
+
 ## License
 
 MIT
