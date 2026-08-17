@@ -310,7 +310,23 @@ def _make_default_app() -> FastAPI | None:
         return None
 
 
-# For `uvicorn locallm_valet.api:app`; None until a config is available.
-# Prefer `python -m locallm_valet --config config.yaml` (or the
-# `locallm-valet` console script), which reports config errors clearly.
-app = _make_default_app()
+class _LazyApp:
+    """Lazy default app — only inits when accessed, so benchmark CLI
+    doesn't trigger a spurious config load on import."""
+
+    _instance: FastAPI | None = None
+
+    def __getattr__(self, name: str):
+        if self._instance is None:
+            self._instance = _make_default_app()
+            if self._instance is None:
+                raise RuntimeError(
+                    "no valid config found; use `python -m locallm_valet --config config.yaml`"
+                )
+        return getattr(self._instance, name)
+
+
+# For `uvicorn locallm_valet.api:app`; the lazy wrapper means import-time
+# side effects (config load) don't happen until uvicorn actually serves.
+# Prefer `python -m locallm_valet --config config.yaml`.
+app: FastAPI = _LazyApp()  # type: ignore[assignment]

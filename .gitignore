@@ -10,3 +10,4 @@ data/
 logs/
 *.log
 deploy/Caddyfile.new
+benchmark_results/
