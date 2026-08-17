@@ -36,7 +36,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     run_p = bench_sub.add_parser("run", help="Run benchmark on one model")
     run_p.add_argument("--model", required=True,
                        help="Model registry name (as the valet knows it).")
-    run_p.add_argument("--dataset", default="builtin",
+    run_p.add_argument("--dataset", default="smoke",
                        help=f"Dataset name (default: builtin). Available: {', '.join(list_datasets())}")
     run_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
@@ -54,7 +54,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Two or more model registry names to compare.")
     cmp_p.add_argument("--labels", nargs="*", default=None,
                        help="Human-readable labels for each model (same order).")
-    cmp_p.add_argument("--dataset", default="builtin",
+    cmp_p.add_argument("--dataset", default="smoke",
                        help=f"Dataset name (default: builtin).")
     cmp_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL.")
@@ -67,7 +67,7 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
 
     # -- all --
     all_p = bench_sub.add_parser("all", help="Run benchmark on EVERY registered model and produce cross-model comparison")
-    all_p.add_argument("--dataset", default="builtin",
+    all_p.add_argument("--dataset", default="smoke",
                        help=f"Dataset name (default: builtin). Available: {', '.join(list_datasets())}")
     all_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")

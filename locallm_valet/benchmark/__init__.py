@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 from .schema import BenchmarkItem, BenchmarkResult, BenchmarkReport, SuiteStats
-from .dataset import get_builtin_dataset, list_datasets
+from .dataset import get_dataset, list_datasets
 from .runner import run_benchmark
 from .scorer import score_result
 from .report import render_report
 
 __all__ = [
     "BenchmarkItem", "BenchmarkResult", "BenchmarkReport", "SuiteStats",
-    "get_builtin_dataset", "list_datasets",
+    "get_dataset", "list_datasets",
     "run_benchmark", "score_result", "render_report",
 ]
