@@ -46,6 +46,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Max generation tokens per question (default: 256).")
     run_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds (default: 180).")
+    run_p.add_argument("--api-key", default=None,
+                       help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
     # -- compare --
     cmp_p = bench_sub.add_parser("compare",
@@ -64,6 +66,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Max generation tokens.")
     cmp_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds.")
+    cmp_p.add_argument("--api-key", default=None,
+                       help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
     # -- all --
     all_p = bench_sub.add_parser("all", help="Run benchmark on EVERY registered model and produce cross-model comparison")
@@ -79,15 +83,34 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Per-request timeout in seconds (default: 180).")
     all_p.add_argument("--skip-models", nargs="*", default=[],
                        help="Optional list of model names to skip (e.g. 'llama-3.2-1b').")
+    all_p.add_argument("--api-key", default=None,
+                       help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
     # -- list-datasets --
     bench_sub.add_parser("list-datasets", help="Show available datasets")
+
+
+def _resolve_api_key(args: argparse.Namespace) -> str:
+    """Explicit --api-key wins; otherwise read the valet's config.yaml."""
+
+    if getattr(args, "api_key", None):
+        return args.api_key
+    try:
+        from ..config import load_config
+
+        cfg = load_config()
+        if cfg.server.api_keys:
+            return cfg.server.api_keys[0]
+    except Exception:  # noqa: BLE001 - key is optional; benchmark may run keyless
+        pass
+    return ""
 
 
 def main(args: argparse.Namespace) -> int:
     """Entry point for the ``benchmark`` subcommand."""
 
     logger = logging.getLogger("locallm_valet.benchmark")
+    api_key = _resolve_api_key(args)
 
     if args.bench_cmd == "list-datasets":
         print("Available datasets:")
@@ -111,6 +134,7 @@ def main(args: argparse.Namespace) -> int:
             items=items,
             model_name=args.model,
             base_url=args.base_url,
+            api_key=api_key,
             max_tokens=args.max_tokens,
             timeout_s=args.timeout,
         )
@@ -127,7 +151,8 @@ def main(args: argparse.Namespace) -> int:
         import httpx
         # Fetch model list from the valet's /v1/models
         try:
-            resp = httpx.get(f"{args.base_url}/models", timeout=10)
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            resp = httpx.get(f"{args.base_url}/models", headers=headers, timeout=10)
             resp.raise_for_status()
         except Exception as exc:
             print(f"Failed to fetch model list from {args.base_url}/models: {exc}", file=sys.stderr)
@@ -146,6 +171,7 @@ def main(args: argparse.Namespace) -> int:
                 items=items,
                 model_name=model_name,
                 base_url=args.base_url,
+                api_key=api_key,
                 max_tokens=args.max_tokens,
                 timeout_s=args.timeout,
             )
@@ -169,6 +195,7 @@ def main(args: argparse.Namespace) -> int:
                 items=items,
                 model_name=model_name,
                 base_url=args.base_url,
+                api_key=api_key,
                 max_tokens=args.max_tokens,
                 timeout_s=args.timeout,
             )
