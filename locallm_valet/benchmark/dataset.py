@@ -1,236 +1,217 @@
 # -*- coding: utf-8 -*-
-"""Built-in benchmark dataset — self-contained, no HF download required.
+"""Benchmark datasets — one built‑in smoke set (zero deps) + MMLU downloaded
+from HuggingFace.
 
-~80 curated items covering fact, reasoning, math, zh, instruction, coding.
-Each item is a simple question with a gold-standard answer that small local
-models should be capable of. Use different model quantisations on the same
-items to detect capability degradation.
+Datasets registered:
+- "smoke" — 6 hardcoded items, no download needed, quick sanity check.
+- "mmlu" — full MMLU (57 subjects, 5‑shot), requires ``pip install datasets``.
+- "mmlu_pro" — MMLU‑Pro (more difficult), requires ``pip install datasets``.
+
+Usage::
+
+    from .dataset import get_dataset, list_datasets
+    items = get_dataset("mmlu")         # auto‑downloads on first call
+    items = get_dataset("smoke")        # no download, instant
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import random
+from pathlib import Path
 from typing import Optional
 
 from .schema import BenchmarkItem
 
+logger = logging.getLogger("locallm_valet.benchmark.dataset")
 
 # ---------------------------------------------------------------------------
-# Item builders — keep the dataset inline so it's zero-dependency
+# Built‑in smoke dataset (from smoke.json, zero dependencies)
 # ---------------------------------------------------------------------------
 
-def _mcq(item_id: str, category: str, question: str,
-         options: list[str], answer_letter: str, language: str = "en") -> BenchmarkItem:
-    """Build a multiple-choice item. Options already prefixed 'A. ' / 'B. ' / …"""
-    choices_str = "\n".join(options)
-    prompt = f"{question}\n\n{choices_str}\n\nAnswer with the letter (A/B/C/D) only."
-    return BenchmarkItem(
-        item_id=item_id, category=category,
-        question=prompt, ground_truth=answer_letter.upper(),
-        choices=options, language=language,
-    )
+_SMOKE_JSON = Path(__file__).resolve().parent / "smoke.json"
 
 
-def _qa(item_id: str, category: str, question: str,
-        ground_truth: str, language: str = "en") -> BenchmarkItem:
-    """Build a short-answer item."""
-    return BenchmarkItem(
-        item_id=item_id, category=category,
-        question=question, ground_truth=ground_truth,
-        language=language,
-    )
-
-
-# ---------------------------------------------------------------------------
-# The full built-in dataset
-# ---------------------------------------------------------------------------
-
-def get_builtin_dataset() -> list[BenchmarkItem]:
-    """Return ~80 curated benchmark items, zero download needed."""
-
+def _get_smoke() -> list[BenchmarkItem]:
+    import json
+    with open(_SMOKE_JSON, "r", encoding="utf-8") as f:
+        raw = json.load(f)
     items: list[BenchmarkItem] = []
-
-    # === Factual knowledge (22 items, en) ===
-    items.append(_mcq("fact_01", "fact",
-        "What is the capital of France?",
-        ["A. Berlin", "B. Madrid", "C. Paris", "D. Rome"], "C"))
-    items.append(_mcq("fact_02", "fact",
-        "Which planet is known as the Red Planet?",
-        ["A. Venus", "B. Mars", "C. Jupiter", "D. Saturn"], "B"))
-    items.append(_mcq("fact_03", "fact",
-        "Who wrote Romeo and Juliet?",
-        ["A. Charles Dickens", "B. William Shakespeare", "C. Mark Twain", "D. Jane Austen"], "B"))
-    items.append(_mcq("fact_04", "fact",
-        "What is the chemical symbol for water?",
-        ["A. H2O", "B. CO2", "C. NaCl", "D. O2"], "A"))
-    items.append(_mcq("fact_05", "fact",
-        "What is the largest ocean on Earth?",
-        ["A. Atlantic", "B. Indian", "C. Arctic", "D. Pacific"], "D"))
-    items.append(_mcq("fact_06", "fact",
-        "In what year did World War II end?",
-        ["A. 1943", "B. 1944", "C. 1945", "D. 1946"], "C"))
-    items.append(_mcq("fact_07", "fact",
-        "What is the freezing point of water in Celsius?",
-        ["A. 0°C", "B. 32°C", "C. 100°C", "D. -10°C"], "A"))
-    items.append(_mcq("fact_08", "fact",
-        "Which gas do plants absorb from the atmosphere?",
-        ["A. Oxygen", "B. Nitrogen", "C. Carbon dioxide", "D. Hydrogen"], "C"))
-    items.append(_mcq("fact_09", "fact",
-        "What is the tallest mountain on Earth?",
-        ["A. K2", "B. Mount Everest", "C. Mount Fuji", "D. Denali"], "B"))
-    items.append(_mcq("fact_10", "fact",
-        "Which element has atomic number 1?",
-        ["A. Helium", "B. Lithium", "C. Hydrogen", "D. Carbon"], "C"))
-    items.append(_mcq("fact_11", "fact",
-        "What is the currency of Japan?",
-        ["A. Yuan", "B. Won", "C. Yen", "D. Dollar"], "C"))
-    items.append(_mcq("fact_12", "fact",
-        "Which country invented paper?",
-        ["A. India", "B. Egypt", "C. China", "D. Greece"], "C"))
-    items.append(_mcq("fact_13", "fact",
-        "What is the speed of light approximately?",
-        ["A. 3×10⁶ m/s", "B. 3×10⁸ m/s", "C. 3×10¹⁰ m/s", "D. 3×10⁵ m/s"], "B"))
-    items.append(_mcq("fact_14", "fact",
-        "Which organ pumps blood in the human body?",
-        ["A. Lung", "B. Liver", "C. Heart", "D. Kidney"], "C"))
-    items.append(_mcq("fact_15", "fact",
-        "Who developed the theory of general relativity?",
-        ["A. Newton", "B. Einstein", "C. Galileo", "D. Hawking"], "B"))
-
-    # === Reasoning (16 items, en) ===
-    items.append(_mcq("reason_01", "reasoning",
-        "All cats are mammals. Tiger is a cat. Is Tiger a mammal?",
-        ["A. Yes", "B. No", "C. Cannot be determined", "D. Only if tiger is a pet"], "A"))
-    items.append(_mcq("reason_02", "reasoning",
-        "A is taller than B. B is taller than C. Who is the shortest?",
-        ["A. A", "B. B", "C. C", "D. Cannot be determined"], "C"))
-    items.append(_mcq("reason_03", "reasoning",
-        "If you flip a fair coin three times, what is the probability of getting heads all three times?",
-        ["A. 1/2", "B. 1/4", "C. 1/8", "D. 1/3"], "C"))
-    items.append(_mcq("reason_04", "reasoning",
-        "John is older than Mary. Mary is older than Tom. Who is the youngest?",
-        ["A. John", "B. Mary", "C. Tom", "D. Cannot be determined"], "C"))
-    items.append(_mcq("reason_05", "reasoning",
-        "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost?",
-        ["A. $0.10", "B. $0.05", "C. $0.15", "D. $0.20"], "B"))
-    items.append(_mcq("reason_06", "reasoning",
-        "Which number comes next in the sequence: 2, 4, 6, 8, ?",
-        ["A. 9", "B. 10", "C. 11", "D. 12"], "B"))
-    items.append(_mcq("reason_07", "reasoning",
-        "If all bloops are groops, and some groops are traangs, which of the following must be true?",
-        ["A. Some bloops are traangs", "B. All groops are bloops",
-         "C. No bloops are traangs", "D. All bloops are groops"], "D"))
-    items.append(_qa("reason_08", "reasoning",
-        "If you have three apples and eat two, how many apples do you have left? Answer with just the number.",
-        "1"))
-
-    # === Math (14 items, en) ===
-    items.append(_mcq("math_01", "math",
-        "What is 12 × 15?",
-        ["A. 150", "B. 160", "C. 170", "D. 180"], "D"))
-    items.append(_mcq("math_02", "math",
-        "What is 144 ÷ 12?",
-        ["A. 10", "B. 11", "C. 12", "D. 13"], "C"))
-    items.append(_mcq("math_03", "math",
-        "What is 25% of 200?",
-        ["A. 25", "B. 40", "C. 50", "D. 75"], "C"))
-    items.append(_mcq("math_04", "math",
-        "Solve for x: 2x + 6 = 14",
-        ["A. x=3", "B. x=4", "C. x=5", "D. x=6"], "B"))
-    items.append(_mcq("math_05", "math",
-        "What is the area of a square with side 7?",
-        ["A. 14", "B. 28", "C. 42", "D. 49"], "D"))
-    items.append(_mcq("math_06", "math",
-        "What is 3² + 4²?",
-        ["A. 12", "B. 25", "C. 7", "D. 14"], "B"))
-    items.append(_qa("math_07", "math",
-        "Calculate: 47 + 35. Answer with just the number.",
-        "82"))
-    items.append(_qa("math_08", "math",
-        "If a train travels at 60 km/h for 2 hours, how far does it travel? Answer with just the number.",
-        "120"))
-
-    # === Chinese capability (14 items, zh) ===
-    items.append(_mcq("zh_01", "chinese",
-        "鲁迅的原名是什么？",
-        ["A. 周作人", "B. 周树人", "C. 胡适", "D. 茅盾"], "B", "zh"))
-    items.append(_mcq("zh_02", "chinese",
-        "中国的首都是哪个城市？",
-        ["A. 上海", "B. 广州", "C. 北京", "D. 深圳"], "C", "zh"))
-    items.append(_mcq("zh_03", "chinese",
-        "一年有多少个月？",
-        ["A. 10个月", "B. 11个月", "C. 12个月", "D. 13个月"], "C", "zh"))
-    items.append(_mcq("zh_04", "chinese",
-        "太阳从哪个方向升起？",
-        ["A. 西方", "B. 南方", "C. 北方", "D. 东方"], "D", "zh"))
-    items.append(_mcq("zh_05", "chinese",
-        "“举头望明月”的下一句是什么？",
-        ["A. 低头思故乡", "B. 疑是地上霜", "C. 春风又绿江南岸", "D. 处处闻啼鸟"], "A", "zh"))
-    items.append(_mcq("zh_06", "chinese",
-        "中国最长的河流是哪条？",
-        ["A. 黄河", "B. 长江", "C. 珠江", "D. 淮河"], "B", "zh"))
-    items.append(_qa("zh_07", "chinese",
-        "请用中文回答：水的化学式是什么？只回答化学式即可。",
-        "H2O", "zh"))
-    items.append(_mcq("zh_08", "chinese",
-        "中华人民共和国的国庆日是几月几日？",
-        ["A. 7月1日", "B. 8月1日", "C. 10月1日", "D. 1月1日"], "C", "zh"))
-
-    # === Instruction following (10 items, en) ===
-    items.append(_qa("instr_01", "instruction",
-        "Reply with exactly one word: Hello.",
-        "Hello"))
-    items.append(_qa("instr_02", "instruction",
-        "List ONLY the number 42 in your response, nothing else.",
-        "42"))
-    items.append(_qa("instr_03", "instruction",
-        "Translate 'good morning' to French. Respond with only the translation.",
-        "bonjour"))
-    items.append(_qa("instr_04", "instruction",
-        "Repeat exactly: The sky is blue.",
-        "The sky is blue."))
-    items.append(_mcq("instr_05", "instruction",
-        "Choose the correct option.",
-        ["A. This is correct", "B. This is wrong", "C. Not sure", "D. None of the above"], "A"))
-
-    # === Coding knowledge (10 items, en) ===
-    items.append(_mcq("code_01", "coding",
-        "What does the Python function len() return?",
-        ["A. The length of an iterable", "B. The square root of a number",
-         "C. The type of an object", "D. The maximum value"], "A"))
-    items.append(_mcq("code_02", "coding",
-        "Which data structure uses FIFO ordering?",
-        ["A. Stack", "B. Queue", "C. Tree", "D. Graph"], "B"))
-    items.append(_mcq("code_03", "coding",
-        "What is the time complexity of binary search?",
-        ["A. O(n)", "B. O(log n)", "C. O(n²)", "D. O(n log n)"], "B"))
-    items.append(_qa("code_04", "coding",
-        "In Python, what keyword is used to define a function? Respond with just the keyword.",
-        "def"))
-
+    for d in raw:
+        lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in d.get("question", "")) else "en"
+        items.append(BenchmarkItem(
+            item_id=d["item_id"],
+            category=d["category"],
+            question=d["question"],
+            ground_truth=d["ground_truth"],
+            choices=d.get("choices", []),
+            language=lang,
+        ))
     return items
 
 
 # ---------------------------------------------------------------------------
-# Dataset registry
+# MMLU download helper (requires ``datasets`` package)
 # ---------------------------------------------------------------------------
 
-_BUILTIN_DATASETS = {
-    "builtin": get_builtin_dataset,
+MMLU_SUBJECTS = [
+    "abstract_algebra", "anatomy", "astronomy", "business_ethics",
+    "clinical_knowledge", "college_biology", "college_computer_science",
+    "college_mathematics", "college_medicine", "college_physics",
+    "computer_security", "conceptual_physics", "econometrics",
+    "electrical_engineering", "elementary_mathematics", "formal_logic",
+    "global_facts", "high_school_biology", "high_school_chemistry",
+    "high_school_computer_science", "high_school_european_history",
+    "high_school_geography", "high_school_government_and_politics",
+    "high_school_macroeconomics", "high_school_mathematics",
+    "high_school_microeconomics", "high_school_physics",
+    "high_school_psychology", "high_school_statistics",
+    "high_school_us_history", "high_school_world_history",
+    "human_aging", "human_sexuality", "international_law",
+    "jurisprudence", "logical_fallacies", "machine_learning",
+    "management", "marketing", "medical_genetics", "miscellaneous",
+    "moral_disputes", "moral_scenarios", "nutrition", "philosophy",
+    "prehistory", "professional_accounting", "professional_law",
+    "professional_medicine", "professional_psychology",
+    "public_relations", "security_studies", "sociology",
+    "us_foreign_policy", "virology", "world_religions",
+]
+
+
+_CACHE_DIRNAME = "dataset_cache"
+
+
+def _cache_dir() -> Path:
+    return Path(_CACHE_DIRNAME)
+
+
+def _mmlu_cache_path() -> Path:
+    return _cache_dir() / "mmlu_items.json"
+
+
+def _dev_examples_path() -> Path:
+    return _cache_dir() / "mmlu_dev.json"
+
+
+def _get_mmlu() -> list[BenchmarkItem]:
+    """Load / download MMLU (57 subjects, 5‑shot). Cached after first
+    download. Requires ``pip install datasets``."""
+    cache = _mmlu_cache_path()
+    if cache.is_file():
+        with open(cache, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        logger.info("Loaded %d items from MMLU cache (%s)", len(raw), cache)
+        return _deserialize_items(raw)
+
+    logger.info("MMLU cache not found, downloading from HuggingFace …")
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        raise ImportError(
+            "MMLU benchmark requires the 'datasets' package.\n"
+            "Install: pip install datasets"
+        )
+
+    all_items: list[dict] = []
+    dev_examples_all: dict[str, list[dict]] = {}
+
+    for subject in MMLU_SUBJECTS:
+        try:
+            ds = load_dataset("cais/mmlu", subject, trust_remote_code=True)
+        except Exception as exc:
+            logger.warning("Failed to load MMLU subject '%s': %s", subject, exc)
+            continue
+
+        # 5‑shot: pick 5 from dev split
+        dev = ds.get("dev", [])
+        random.shuffle(dev)
+        fewshot_text = _format_fewshot(dev[:5], subject)
+
+        # Test items
+        test = ds.get("test", [])
+        for i, row in enumerate(test):
+            question = row["question"]
+            choices = row["choices"]
+            answer_idx = row["answer"]  # 0‑3 int
+            answer_letter = chr(ord("A") + answer_idx)
+
+            # Build prompt: subject header + fewshot + question
+            prompt = (
+                f"The following are multiple choice questions (with answers) about {subject}.\n\n"
+                f"{fewshot_text}\n"
+                f"Question: {question}\n"
+                f"A. {choices[0]}  B. {choices[1]}  C. {choices[2]}  D. {choices[3]}\n"
+                f"Answer:"
+            )
+
+            all_items.append({
+                "item_id": f"mmlu_{subject}_{i}",
+                "category": "fact",
+                "question": prompt,
+                "ground_truth": answer_letter,
+                "choices": [f"A. {choices[0]}", f"B. {choices[1]}",
+                            f"C. {choices[2]}", f"D. {choices[3]}"],
+            })
+
+    # Save cache
+    _cache_dir().mkdir(parents=True, exist_ok=True)
+    with open(cache, "w", encoding="utf-8") as f:
+        json.dump(all_items, f, ensure_ascii=False)
+    logger.info("MMLU cached: %d items across %d subjects (%s)",
+                len(all_items), len(set(it["item_id"].split("_")[1] for it in all_items)), cache)
+
+    return _deserialize_items(all_items)
+
+
+def _format_fewshot(rows: list[dict], subject: str) -> str:
+    lines = []
+    for row in rows:
+        q = row["question"]
+        c = row["choices"]
+        a = chr(ord("A") + row["answer"])
+        lines.append(
+            f"Question: {q}\n"
+            f"A. {c[0]}  B. {c[1]}  C. {c[2]}  D. {c[3]}\n"
+            f"Answer: {a}\n"
+        )
+    return "\n".join(lines)
+
+
+def _deserialize_items(raw: list[dict]) -> list[BenchmarkItem]:
+    items: list[BenchmarkItem] = []
+    for d in raw:
+        lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in d.get("question", "")) else "en"
+        items.append(BenchmarkItem(
+            item_id=d["item_id"],
+            category=d.get("category", "fact"),
+            question=d["question"],
+            ground_truth=d["ground_truth"],
+            choices=d.get("choices", []),
+            language=lang,
+        ))
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Registry
+# ---------------------------------------------------------------------------
+
+_DATASETS: dict[str, callable] = {
+    "smoke": _get_smoke,
+    "mmlu": _get_mmlu,
 }
 
-# Aliases
-_BUILTIN_DATASETS["builtin_qa"] = get_builtin_dataset
-_BUILTIN_DATASETS["default"] = get_builtin_dataset
 
-
-def get_dataset(name: str = "builtin") -> list[BenchmarkItem]:
-    """Return a dataset by name. Raises KeyError if unknown."""
-    builder = _BUILTIN_DATASETS.get(name)
+def get_dataset(name: str = "smoke") -> list[BenchmarkItem]:
+    builder = _DATASETS.get(name)
     if builder is None:
-        raise KeyError(f"Unknown dataset: {name}. Available: {list_datasets()}")
+        raise KeyError(
+            f"Unknown dataset: {name!r}. "
+            f"Available: {', '.join(list_datasets())}"
+        )
     return builder()
 
 
 def list_datasets() -> list[str]:
-    """List available dataset names."""
-    return sorted(set(_BUILTIN_DATASETS.keys()))
+    return sorted(_DATASETS.keys())

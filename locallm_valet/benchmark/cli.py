@@ -65,6 +65,21 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     cmp_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds.")
 
+    # -- all --
+    all_p = bench_sub.add_parser("all", help="Run benchmark on EVERY registered model and produce cross-model comparison")
+    all_p.add_argument("--dataset", default="builtin",
+                       help=f"Dataset name (default: builtin). Available: {', '.join(list_datasets())}")
+    all_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
+                       help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
+    all_p.add_argument("--output-dir", default="benchmark_results",
+                       help="Output directory (default: benchmark_results/).")
+    all_p.add_argument("--max-tokens", type=int, default=256,
+                       help="Max generation tokens per question (default: 256).")
+    all_p.add_argument("--timeout", type=int, default=180,
+                       help="Per-request timeout in seconds (default: 180).")
+    all_p.add_argument("--skip-models", nargs="*", default=[],
+                       help="Optional list of model names to skip (e.g. 'llama-3.2-1b').")
+
     # -- list-datasets --
     bench_sub.add_parser("list-datasets", help="Show available datasets")
 
@@ -106,6 +121,43 @@ def main(args: argparse.Namespace) -> int:
             report_name=f"benchmark_{args.model}.md",
         )
         print(f"\nReport saved to: {out_path}")
+        return 0
+
+    if args.bench_cmd == "all":
+        import httpx
+        # Fetch model list from the valet's /v1/models
+        try:
+            resp = httpx.get(f"{args.base_url}/models", timeout=10)
+            resp.raise_for_status()
+        except Exception as exc:
+            print(f"Failed to fetch model list from {args.base_url}/models: {exc}", file=sys.stderr)
+            return 1
+        models_in_registry = [m["id"] for m in resp.json().get("data", [])]
+        skip = set(args.skip_models or [])
+        models_to_run = [m for m in models_in_registry if m not in skip]
+        if not models_to_run:
+            print("No models to benchmark (all skipped or registry empty).", file=sys.stderr)
+            return 1
+        print(f"Found {len(models_in_registry)} models in registry, will benchmark {len(models_to_run)}:\n  {', '.join(models_to_run)}\n")
+        all_results = []
+        for model_name in models_to_run:
+            logger.info("Benchmarking model=%s  (%d items)", model_name, len(items))
+            results = run_benchmark(
+                items=items,
+                model_name=model_name,
+                base_url=args.base_url,
+                max_tokens=args.max_tokens,
+                timeout_s=args.timeout,
+            )
+            all_results.extend(results)
+        out_path = render_report(
+            results=all_results,
+            dataset_name=args.dataset,
+            output_dir=args.output_dir,
+            report_name="benchmark_comparison.md",
+            compare_labels=models_to_run,
+        )
+        print(f"\nComparison report saved to: {out_path}")
         return 0
 
     if args.bench_cmd == "compare":
