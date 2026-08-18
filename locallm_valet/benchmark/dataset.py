@@ -1,22 +1,26 @@
 # -*- coding: utf-8 -*-
-"""Benchmark datasets — smoke (built-in) + cached from datasets_eval.txz.
+"""Benchmark datasets — smoke (built-in) + datasets cached on disk.
 
-Datasets (all from local cache, zero downloads after extraction):
+Datasets:
   - "smoke"      — 6 built-in items, no cache needed
   - "mmlu"       — MMLU (57 subjects, 5-shot)
-  - "mmlu_pro"   — MMLU-Pro
+  - "mmlu_pro"   - MMLU-Pro
   - "bfcl"       — Berkeley Function Calling Leaderboard
   - "mmstar"     — MMStar
   - "ocrbench"   — OCRBench
 
-Extract the archive to the project root first:
-  tar -xJf datasets_eval.txz -C locallm-valet/dataset_cache
+Each cached dataset lives at ``<cache>/<name>/processed.json`` (plus optional
+``dev_examples.json`` and ``sample_<N>_indices.json``).  The cache root is
+configurable via the ``LOCALLM_VALET_DATASET_CACHE`` environment variable
+(default: ``<project>/dataset_cache/dataset``); point it at wherever the
+extracted dataset directory lives on your machine.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 from pathlib import Path
 from typing import Optional
@@ -47,26 +51,54 @@ def _get_smoke() -> list[BenchmarkItem]:
 
 
 # ---------------------------------------------------------------------------
-# Local cache from datasets_eval.txz
+# Local dataset cache (configurable root)
 # ---------------------------------------------------------------------------
 
-# dataset_cache/ is at the project root (two levels up from benchmark/)
-_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "dataset_cache" / "dataset"
+_DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "dataset_cache" / "dataset"
 
 
-def _load_processed(name: str) -> tuple[list[dict], Optional[dict]]:
-    """Load processed.json (+ dev_examples.json if present) from cache."""
-    p = _CACHE_DIR / name / "processed.json"
+def _cache_dir() -> Path:
+    """Dataset cache root.
+
+    Override with the ``LOCALLM_VALET_DATASET_CACHE`` env var (e.g. point it
+    at an extracted dataset directory on another drive / machine).
+    """
+
+    override = os.environ.get("LOCALLM_VALET_DATASET_CACHE")
+    if override:
+        return Path(override)
+    return _DEFAULT_CACHE_DIR
+
+
+def _load_processed(name: str, sample: int | None = None) -> tuple[list[dict], Optional[dict]]:
+    """Load processed.json (+ dev_examples.json if present) from cache.
+
+    ``sample``: when set, apply the fixed ``sample_<N>_indices.json`` subset
+    written by ``benchmark download`` (fallback: first N rows).
+    """
+    cache = _cache_dir()
+    p = cache / name / "processed.json"
     if not p.is_file():
         raise FileNotFoundError(
             f"Dataset '{name}' not cached at {p}. "
-            f"Extract datasets_eval.txz to {_CACHE_DIR.parent}"
+            f"Run 'benchmark download --datasets {name}' or put an extracted "
+            f"dataset directory under the cache root (LOCALLM_VALET_DATASET_CACHE)."
         )
     with open(p, "r", encoding="utf-8") as f:
         items: list[dict] = json.load(f)
 
+    if sample is not None and sample > 0 and sample < len(items):
+        idx_p = cache / name / f"sample_{sample}_indices.json"
+        if idx_p.is_file():
+            with open(idx_p, "r", encoding="utf-8") as f:
+                indices: list[int] = json.load(f)
+            indices = [i for i in indices if 0 <= i < len(items)]
+            items = [items[i] for i in indices]
+        else:
+            items = items[:sample]
+
     dev: Optional[dict] = None
-    dev_p = _CACHE_DIR / name / "dev_examples.json"
+    dev_p = cache / name / "dev_examples.json"
     if dev_p.is_file():
         with open(dev_p, "r", encoding="utf-8") as f:
             dev = json.load(f)
@@ -185,24 +217,24 @@ def _from_generic(items_raw: list[dict]) -> list[BenchmarkItem]:
 # Dataset-specific loaders
 # ---------------------------------------------------------------------------
 
-def _get_mmlu() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("mmlu")
+def _get_mmlu(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("mmlu", sample)
     return _convert(items_raw, dev)
 
-def _get_mmlu_pro() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("mmlu_pro")
+def _get_mmlu_pro(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("mmlu_pro", sample)
     return _convert(items_raw, dev)
 
-def _get_bfcl() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("bfcl")
+def _get_bfcl(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("bfcl", sample)
     return _convert(items_raw, dev)
 
-def _get_mmstar() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("mmstar")
+def _get_mmstar(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("mmstar", sample)
     return _convert(items_raw, dev)
 
-def _get_ocrbench() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("ocrbench")
+def _get_ocrbench(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("ocrbench", sample)
     return _convert(items_raw, dev)
 
 
@@ -220,11 +252,11 @@ _DATASETS: dict[str, callable] = {
 }
 
 
-def get_dataset(name: str = "smoke") -> list[BenchmarkItem]:
+def get_dataset(name: str = "smoke", sample: int | None = None) -> list[BenchmarkItem]:
     builder = _DATASETS.get(name)
     if builder is None:
         raise KeyError(f"Unknown dataset: {name!r}. Available: {', '.join(list_datasets())}")
-    return builder()
+    return builder(sample)
 
 
 def list_datasets() -> list[str]:

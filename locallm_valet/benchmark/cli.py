@@ -83,6 +83,22 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Per-request timeout in seconds (default: 180).")
     all_p.add_argument("--skip-models", nargs="*", default=[],
                        help="Optional list of model names to skip (e.g. 'llama-3.2-1b').")
+    all_p.add_argument("--sample", type=int, default=None,
+                       help="Sample N items (uses sample_N_indices.json when available; default: full).")
+    all_p.add_argument("--concurrency", type=int, default=4,
+                       help="Parallel requests per model (SGLang/vLLM batch well; default 4).")
+
+    # -- download --
+    dl_p = bench_sub.add_parser("download",
+                                help="Download benchmark datasets into the local cache")
+    dl_p.add_argument("--datasets", nargs="*", default=None,
+                      help="Dataset names to fetch (default: all cached datasets).")
+    dl_p.add_argument("--sample", type=int, default=500,
+                      help="Also write a fixed sample_<N>_indices.json (default: 500).")
+    dl_p.add_argument("--cache-dir", default=None,
+                      help="Cache root (default: LOCALLM_VALET_DATASET_CACHE or ./dataset_cache/dataset).")
+    dl_p.add_argument("--mirror", default="hf",
+                      help="Source: hf (default) | hf-mirror | tuna (needs LOCALLM_VALET_HF_ENDPOINT) | modelscope")
     all_p.add_argument("--api-key", default=None,
                        help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
@@ -118,9 +134,29 @@ def main(args: argparse.Namespace) -> int:
             print(f"  {name}")
         return 0
 
+    if args.bench_cmd == "download":
+        from pathlib import Path
+
+        from .dataset import _cache_dir
+        from .download import download_datasets, _SOURCES
+
+        names = args.datasets or sorted(_SOURCES.keys())
+        cache = Path(args.cache_dir) if args.cache_dir else _cache_dir()
+        print(f"Downloading {len(names)} dataset(s) -> {cache}  (mirror={args.mirror}, sample={args.sample})")
+        status = download_datasets(
+            names=names, cache_dir=cache, sample=args.sample, mirror=args.mirror,
+        )
+        for name, st in status.items():
+            print(f"  {name:10s} {st}")
+        failed = [n for n, st in status.items() if not st.startswith("ok")]
+        if failed:
+            print(f"Failed: {', '.join(failed)}", file=sys.stderr)
+            return 1
+        return 0
+
     # Load the dataset
     try:
-        items = get_dataset(args.dataset)
+        items = get_dataset(args.dataset, sample=getattr(args, "sample", None))
     except KeyError as exc:
         print(f"Unknown dataset: {args.dataset}", file=sys.stderr)
         print(f"Available: {', '.join(list_datasets())}", file=sys.stderr)
