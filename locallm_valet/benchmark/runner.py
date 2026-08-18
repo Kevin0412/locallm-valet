@@ -101,6 +101,13 @@ def _run_one(
                     "messages": messages,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
+                    # Thinking-capable models (Qwen3 via SGLang, gemma-4 via
+                    # llama.cpp) default to a reasoning mode that burns the
+                    # token budget on reasoning_content and leaves content
+                    # empty — which would score every question wrong. Disable
+                    # thinking for benchmarking so the answer is produced
+                    # directly. Both backends honor this template variable.
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 retries=retries,
             )
@@ -120,7 +127,12 @@ def _run_one(
         raw_text = ""
         if choices:
             msg = choices[0].get("message", {}) or {}
-            raw_text = msg.get("content", "")
+            raw_text = msg.get("content", "") or ""
+            if not raw_text.strip():
+                # Safety net: if content is empty (e.g. the backend still
+                # routed output to reasoning_content), keep that text so an
+                # answer is never silently lost.
+                raw_text = msg.get("reasoning_content", "") or ""
         usage = data.get("usage", {})
         completion_tokens = usage.get("completion_tokens", 0)
 
