@@ -156,6 +156,13 @@ def _worker(job: BenchmarkJob, output_dir: str) -> None:
                     r.is_correct = False
         all_results.extend(results)
         job.done_items += len(results)
+        # Persist per-model immediately so partial results are visible while
+        # the rest of the run continues.
+        try:
+            _save_model(job, results, output_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("benchmark save failed for %s", model_name)
+            job.error = job.error or f"save {model_name}: {exc}"
         if job._control.cancel:
             job.state = "stopped"
             break
@@ -184,11 +191,24 @@ def _save_results(job: BenchmarkJob, results: list[BenchmarkResult], output_dir:
         by_model.setdefault(r.model_name, []).append(r)
 
     for model_name, rlist in by_model.items():
-        path = out / f"{model_name}_results.jsonl"
-        with open(path, "w", encoding="utf-8") as f:
-            for r in rlist:
-                f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
+        _write_model_jsonl(out, model_name, rlist)
     logger.info("saved %d result file(s) under %s", len(by_model), out)
+
+
+def _save_model(job: BenchmarkJob, results: list[BenchmarkResult], output_dir: str) -> None:
+    """Persist one model's results as its own JSONL file immediately."""
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    _write_model_jsonl(out, results[0].model_name if results else "unknown", results)
+    logger.info("saved %d results for %s under %s", len(results),
+                results[0].model_name if results else "?", out)
+
+
+def _write_model_jsonl(out: Path, model_name: str, results: list[BenchmarkResult]) -> None:
+    path = out / f"{model_name}_results.jsonl"
+    with open(path, "w", encoding="utf-8") as f:
+        for r in results:
+            f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
 
 
 def pause_job() -> BenchmarkJob:
