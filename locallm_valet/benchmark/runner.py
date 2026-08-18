@@ -15,6 +15,28 @@ from .schema import BenchmarkItem, BenchmarkResult
 logger = logging.getLogger("locallm_valet.benchmark.runner")
 
 
+class JobControl:
+    """Cooperative pause/cancel flags for a benchmark job.
+
+    The runner checks these between items so the web UI can pause, resume
+    or stop a long benchmark run without killing the process.
+    """
+
+    __slots__ = ("paused", "cancel")
+
+    def __init__(self) -> None:
+        self.paused = False
+        self.cancel = False
+
+    def wait_if_paused(self) -> None:
+        """Block while paused (checks cancellation too)."""
+        import time as _t
+        while self.paused:
+            if self.cancel:
+                return
+            _t.sleep(0.2)
+
+
 def run_benchmark(
     *,
     items: list[BenchmarkItem],
@@ -26,6 +48,7 @@ def run_benchmark(
     timeout_s: int = 180,
     concurrency: int = 1,
     save_responses: bool = True,
+    control: JobControl | None = None,
 ) -> list[BenchmarkResult]:
     """Run a list of benchmark items through the valet API.
 
@@ -39,6 +62,7 @@ def run_benchmark(
         timeout_s: Per-request timeout.
         concurrency: Number of concurrent requests (1 = serial, simplest).
         save_responses: If True, record raw response text in the result.
+        control: Optional JobControl for pause/resume/stop from the web UI.
 
     Returns:
         List of BenchmarkResult, one per item.
@@ -51,6 +75,12 @@ def run_benchmark(
     chat_url = f"{base_url.rstrip('/')}/chat/completions"
 
     for idx, item in enumerate(items):
+        if control is not None:
+            if control.cancel:
+                logger.info("[%d/%d] job cancelled, stopping", idx + 1, len(items))
+                break
+            control.wait_if_paused()
+
         messages = [
             {"role": "user", "content": item.question},
         ]
