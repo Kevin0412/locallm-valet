@@ -384,6 +384,9 @@ async def test_status_shape(manager, memory, runner):
     ms = {m["name"]: m for m in manager.models_status()}
     assert ms["qwen"]["max_context_tokens"] == 123456
     assert ms["gemma"]["max_context_tokens"] is None  # unknown until loaded
+    # backend concurrency hint is surfaced verbatim (None when not declared)
+    assert ms["qwen"]["max_concurrency"] is None
+    assert "max_concurrency" in ms["gemma"]
     # unloaded -> None everywhere
     await manager.stop()
     assert manager.status()["max_context_tokens"] is None

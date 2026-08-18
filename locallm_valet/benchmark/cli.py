@@ -19,6 +19,8 @@ from .dataset import get_dataset, list_datasets
 from .runner import run_benchmark
 from .report import render_report
 
+logger = logging.getLogger("locallm_valet.benchmark")
+
 
 def build_subparser(sub: argparse._SubParsersAction) -> None:
     """Add the ``benchmark`` command and its subcommands.
@@ -47,7 +49,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     run_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds (default: 180).")
     run_p.add_argument("--concurrency", type=int, default=4,
-                       help="Parallel requests (SGLang/vLLM batch well; default 4).")
+                       help="Parallel requests; capped by the backend's max_concurrency "
+                            "when the model declares one (default 4).")
     run_p.add_argument("--retries", type=int, default=2,
                        help="Extra attempts per item on timeout/5xx (default: 2).")
     run_p.add_argument("--api-key", default=None,
@@ -71,7 +74,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     cmp_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds.")
     cmp_p.add_argument("--concurrency", type=int, default=4,
-                       help="Parallel requests per model (default 4).")
+                       help="Parallel requests per model; capped by the backend's "
+                            "max_concurrency when declared (default 4).")
     cmp_p.add_argument("--retries", type=int, default=2,
                        help="Extra attempts per item on timeout/5xx (default: 2).")
     cmp_p.add_argument("--api-key", default=None,
@@ -94,7 +98,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     all_p.add_argument("--sample", type=int, default=None,
                        help="Sample N items (uses sample_N_indices.json when available; default: full).")
     all_p.add_argument("--concurrency", type=int, default=4,
-                       help="Parallel requests per model (SGLang/vLLM batch well; default 4).")
+                       help="Parallel requests per model; capped by each backend's "
+                            "max_concurrency when declared (default 4).")
     all_p.add_argument("--retries", type=int, default=2,
                        help="Extra attempts per item on timeout/5xx (default: 2).")
 
@@ -132,10 +137,46 @@ def _resolve_api_key(args: argparse.Namespace) -> str:
     return ""
 
 
+def _fetch_concurrency_caps(base_url: str, api_key: str) -> dict[str, int]:
+    """Fetch per-model backend ``max_concurrency`` from the valet's gateway.
+
+    The gateway (not the benchmark) knows each model's backend — llama.cpp
+    can only serve ``n_slots`` requests truly in parallel, SGLang/vLLM batch.
+    Returns ``{model: cap}`` for models that declare a cap; ``{}`` when the
+    gateway is unreachable (the CLI then falls back to ``--concurrency``).
+    """
+    import httpx
+
+    gw = base_url.rstrip("/")
+    if gw.endswith("/v1"):
+        gw = gw[: -len("/v1")]
+    url = f"{gw}/gateway/models"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        resp = httpx.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        caps: dict[str, int] = {}
+        for m in resp.json().get("models", []):
+            cap = m.get("max_concurrency")
+            if isinstance(cap, int) and cap >= 1:
+                caps[m["name"]] = cap
+        return caps
+    except Exception as exc:  # noqa: BLE001 - caps are an optimization, never fatal
+        logger.warning("Could not fetch backend concurrency caps from %s: %s", url, exc)
+        return {}
+
+
+def _capped_concurrency(requested: int, caps: dict[str, int], model: str) -> int:
+    """Cap ``requested`` concurrency to the backend's declared limit."""
+    cap = caps.get(model)
+    if not cap:
+        return requested
+    return min(requested, cap)
+
+
 def main(args: argparse.Namespace) -> int:
     """Entry point for the ``benchmark`` subcommand."""
 
-    logger = logging.getLogger("locallm_valet.benchmark")
     api_key = _resolve_api_key(args)
 
     if args.bench_cmd == "list-datasets":
@@ -176,6 +217,11 @@ def main(args: argparse.Namespace) -> int:
     if args.bench_cmd == "run":
         logger.info("Benchmark run — model=%s  dataset=%s  base_url=%s",
                     args.model, args.dataset, args.base_url)
+        caps = _fetch_concurrency_caps(args.base_url, api_key)
+        concurrency = _capped_concurrency(args.concurrency, caps, args.model)
+        if concurrency != args.concurrency:
+            logger.info("model %s: concurrency capped %d -> %d (backend limit)",
+                        args.model, args.concurrency, concurrency)
         results = run_benchmark(
             items=items,
             model_name=args.model,
@@ -183,7 +229,7 @@ def main(args: argparse.Namespace) -> int:
             api_key=api_key,
             max_tokens=args.max_tokens,
             timeout_s=args.timeout,
-            concurrency=args.concurrency,
+            concurrency=concurrency,
             retries=args.retries,
         )
         out_path = render_report(
@@ -212,9 +258,15 @@ def main(args: argparse.Namespace) -> int:
             print("No models to benchmark (all skipped or registry empty).", file=sys.stderr)
             return 1
         print(f"Found {len(models_in_registry)} models in registry, will benchmark {len(models_to_run)}:\n  {', '.join(models_to_run)}\n")
+        caps = _fetch_concurrency_caps(args.base_url, api_key)
         all_results = []
         for model_name in models_to_run:
-            logger.info("Benchmarking model=%s  (%d items)", model_name, len(items))
+            concurrency = _capped_concurrency(args.concurrency, caps, model_name)
+            if concurrency != args.concurrency:
+                logger.info("model %s: concurrency capped %d -> %d (backend limit)",
+                            model_name, args.concurrency, concurrency)
+            logger.info("Benchmarking model=%s  (%d items, concurrency=%d)",
+                        model_name, len(items), concurrency)
             results = run_benchmark(
                 items=items,
                 model_name=model_name,
@@ -222,7 +274,7 @@ def main(args: argparse.Namespace) -> int:
                 api_key=api_key,
                 max_tokens=args.max_tokens,
                 timeout_s=args.timeout,
-                concurrency=args.concurrency,
+                concurrency=concurrency,
                 retries=args.retries,
             )
             all_results.extend(results)
@@ -238,9 +290,14 @@ def main(args: argparse.Namespace) -> int:
 
     if args.bench_cmd == "compare":
         models = args.models
+        caps = _fetch_concurrency_caps(args.base_url, api_key)
         all_results = []
         for model_name in models:
-            logger.info("Running benchmark — model=%s", model_name)
+            concurrency = _capped_concurrency(args.concurrency, caps, model_name)
+            if concurrency != args.concurrency:
+                logger.info("model %s: concurrency capped %d -> %d (backend limit)",
+                            model_name, args.concurrency, concurrency)
+            logger.info("Running benchmark — model=%s (concurrency=%d)", model_name, concurrency)
             results = run_benchmark(
                 items=items,
                 model_name=model_name,
@@ -248,7 +305,7 @@ def main(args: argparse.Namespace) -> int:
                 api_key=api_key,
                 max_tokens=args.max_tokens,
                 timeout_s=args.timeout,
-                concurrency=args.concurrency,
+                concurrency=concurrency,
                 retries=args.retries,
             )
             all_results.extend(results)

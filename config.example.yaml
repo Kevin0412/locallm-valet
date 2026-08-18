@@ -96,6 +96,12 @@ models:
         - qwen3_coder
         - --kv-cache-dtype
         - fp8_e4m3
+      # How many requests this backend can genuinely serve in parallel.
+      # SGLang/vLLM batch, so a generous number (or omit) is fine; llama.cpp
+      # is limited to its slots (--parallel / n_slots). The benchmark CLI
+      # caps its --concurrency to this value when set; omit (null) = the CLI
+      # uses its own --concurrency.
+      # max_concurrency: 8
 
   # ---- CPU/NPU machine example (Windows + OpenVINO, no NVIDIA driver) ----
   # Leave required_vram_gib unset (or 0): the VRAM gate is skipped when NVML
@@ -111,7 +117,10 @@ models:
   #   path: C:\models\llama-3.2-3b-instruct-q8.gguf
   #   required_ram_gib: 8
   #   backend:
-  #     extra_args: ["--ctx-size", 8192, "-ngl", 0]
+  #     # llama-server serves exactly --parallel slots; benchmark concurrency
+  #     # is capped to this when set
+  #     max_concurrency: 4
+  #     extra_args: ["--ctx-size", 8192, "-ngl", 0, "--parallel", "4"]
 
   # ---- MIXED BACKENDS: vLLM and llama.cpp in one registry ----
   # Per-model backend.command_template overrides the global one; per-model

@@ -56,6 +56,31 @@ def test_load_config(tmp_path, monkeypatch):
     assert q.required_ram_gib == 36
     assert q.backend.extra_args == ["--kv-cache-dtype", "fp8_e4m3"]
     assert q.backend.env == {"LD_PRELOAD": "/usr/lib/libstdc++.so.6"}
+    assert q.backend.max_concurrency is None  # unset = unknown, CLI decides
+
+
+def test_max_concurrency_parsing(tmp_path, monkeypatch):
+    """backend.max_concurrency is optional; validated when present."""
+    monkeypatch.delenv("LOCALLM_VALET_IDLE_TIMEOUT_SECONDS", raising=False)
+    # valid positive int
+    cfg = load_config(write_sample(tmp_path, SAMPLE.replace(
+        "      extra_args: [--kv-cache-dtype, fp8_e4m3]",
+        "      extra_args: [--kv-cache-dtype, fp8_e4m3]\n      max_concurrency: 4",
+    )))
+    assert cfg.models["qwen"].backend.max_concurrency == 4
+    # explicit null = unknown
+    cfg2 = load_config(write_sample(tmp_path, SAMPLE.replace(
+        "      extra_args: [--kv-cache-dtype, fp8_e4m3]",
+        "      extra_args: [--kv-cache-dtype, fp8_e4m3]\n      max_concurrency: null",
+    )))
+    assert cfg2.models["qwen"].backend.max_concurrency is None
+    # zero / negative / non-int are rejected
+    for bad in ("0", "-1", "true", "'four'"):
+        with pytest.raises(ConfigError, match="max_concurrency"):
+            load_config(write_sample(tmp_path, SAMPLE.replace(
+                "      extra_args: [--kv-cache-dtype, fp8_e4m3]",
+                f"      extra_args: [--kv-cache-dtype, fp8_e4m3]\n      max_concurrency: {bad}",
+            )))
 
 
 def test_default_command_template_is_sglang():

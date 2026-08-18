@@ -587,6 +587,7 @@ class ModelManager:
                     "required_vram_gib": spec.required_vram_gib,
                     "required_ram_gib": spec.required_ram_gib,
                     "extra_args": spec.backend.extra_args,
+                    "max_concurrency": spec.backend.max_concurrency,
                     "loaded": self.state is State.RUNNING and self.current_model == name,
                     "max_context_tokens": (
                         self.max_context_tokens

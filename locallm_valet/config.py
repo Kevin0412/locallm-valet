@@ -56,6 +56,12 @@ class ModelBackendArgs:
     # internal port is safe).
     command_template: str | None = None
     health_path: str | None = None
+    # How many parallel requests this backend can genuinely serve at once
+    # (llama.cpp: n_slots / --parallel; SGLang & vLLM: effectively unbounded,
+    # they batch). ``None`` = unknown → the benchmark CLI falls back to its
+    # own ``--concurrency``. Only fire more requests than this if the backend
+    # can batch them — a single-slot llama.cpp would just queue or 429.
+    max_concurrency: int | None = None
 
 
 @dataclass
@@ -199,6 +205,15 @@ def _parse_model_backend(raw: Any, name: str) -> ModelBackendArgs:
             if not isinstance(value, str) or not value.strip():
                 raise ConfigError(f"models.{name}.backend.health_path: expected a non-empty string")
             out.health_path = value
+        elif key == "max_concurrency":
+            if value is None:
+                out.max_concurrency = None
+            elif isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ConfigError(
+                    f"models.{name}.backend.max_concurrency: expected a positive integer or null"
+                )
+            else:
+                out.max_concurrency = value
         else:
             raise ConfigError(f"models.{name}.backend: unknown key {key!r}")
     return out
