@@ -40,7 +40,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .trend { display:flex; align-items:flex-end; gap:2px; height:120px; padding-top:8px; }
   .trend .col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; gap:2px; min-width:0; height:100%; }
   .trend .bar2 { width:70%; background:linear-gradient(180deg,#7fb0ff,var(--accent)); border-radius:3px 3px 0 0; }
-  .trend .lbl { font-size:10px; color:var(--muted); transform:rotate(-45deg); transform-origin:top center; }
+  .trend .lbl { font-size:10px; color:var(--muted); transform:rotate(0deg); transform-origin:top center; }
   .muted { color:var(--muted); }
   .err-text { color:var(--err); }
   #refreshAt { color:var(--muted); font-size:12px; }
@@ -156,7 +156,7 @@ function render(data) {
       const h = Math.max(2, Math.round(100 * x.completion_tokens / max));
       const t = new Date(x.bucket_epoch * 1000);
       const pad = n => String(n).padStart(2, '0');
-      const lbl = (t.getMonth() + 1) + '-' + pad(t.getDate()) + ' ' + pad(t.getHours()) + ':00';
+      const lbl = (() => { const g = $('groupSel').value; return g === 'hour' ? pad(t.getHours()) + ':00' : (t.getMonth()+1) + '-' + pad(t.getDate()); })();
       return `<div class="col" title="${lbl} · 出 ${fmt(x.completion_tokens)} / 入 ${fmt(x.prompt_tokens)} / ${fmt(x.requests)} 请求">
         <span class="bar2" style="height:${h}%"></span><span class="lbl">${lbl}</span></div>`;
     }).join('');

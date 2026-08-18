@@ -65,7 +65,7 @@ def render_report(
 
     report = BenchmarkReport(
         dataset_name=dataset_name,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now().astimezone().isoformat(),
         stats=stats_list,
         results=results,
     )
