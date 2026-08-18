@@ -118,9 +118,12 @@ models:
   #   required_ram_gib: 8
   #   backend:
   #     # llama-server serves exactly --parallel slots; benchmark concurrency
-  #     # is capped to this when set
+  #     # is capped to this when set. Note: per-request context =
+  #     # --ctx-size / --parallel (verified in llama-context.cpp: n_ctx_seq =
+  #     # n_ctx / n_seq_max) — e.g. --ctx-size 262144 with --parallel 4 gives
+  #     # each request at most 65536 tokens of context.
   #     max_concurrency: 4
-  #     extra_args: ["--ctx-size", 8192, "-ngl", 0, "--parallel", "4"]
+  #     extra_args: ["--ctx-size", 262144, "-ngl", 99, "--parallel", "4"]
 
   # ---- MIXED BACKENDS: vLLM and llama.cpp in one registry ----
   # Per-model backend.command_template overrides the global one; per-model
