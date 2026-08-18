@@ -348,7 +348,7 @@ def create_app(
                 base_url=f"http://127.0.0.1:{config.server.port}/v1",
                 max_tokens=int(payload.get("max_tokens", 256)),
                 sample=payload.get("sample"),
-                concurrency=int(payload.get("concurrency", 4)),
+                concurrency=int(payload.get("concurrency", 1)),
             )
             return job.status()
 
@@ -448,8 +448,8 @@ def _render_benchmark_page(config: Config) -> str:
       <select id="dsSel">{dataset_opts}</select>
       <input type="number" id="sampleSel" min="0" step="100" placeholder="sample (0=full)" value="" style="width:130px"
              title="采样条数，0/空 = 全量；有 sample_N_indices.json 时用固定抽样">
-      <input type="number" id="concSel" min="1" max="32" value="4" style="width:70px"
-             title="并发/批大小">
+      <input type="number" id="concSel" min="1" max="32" value="1" style="width:70px"
+             title="并发/批大小：llama.cpp 单槽用 1；SGLang/vLLM 等支持并发的后端可调高（如 4-8）">
       <select id="modelSel" multiple size="4" style="min-width:240px">
         {model_opts}
       </select>
