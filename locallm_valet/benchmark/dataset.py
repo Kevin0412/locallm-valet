@@ -186,13 +186,14 @@ def _from_ref_converted(items_raw: list[dict]) -> list[BenchmarkItem]:
 
         # Some datasets (e.g. MMLU-Pro) store the question and its options
         # separately. If the question text does not already contain the
-        # options, render them as a multiple-choice block so the model can
-        # answer by letter — otherwise it never sees the choices.
+        # options, render them as a multiple-choice block with an explicit
+        # letter-only instruction — without it, models answer with a long
+        # explanation and never state the letter within the token budget.
         if choices_raw and all(c not in question_text for c in choices):
             prompt = (
                 f"Question: {question_text}\n"
                 + "  ".join(choices)
-                + "\nAnswer:"
+                + "\nAnswer with the letter only: "
             )
         else:
             prompt = question_text
