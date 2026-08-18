@@ -184,10 +184,23 @@ def _from_ref_converted(items_raw: list[dict]) -> list[BenchmarkItem]:
         choices_raw = row.get("options", [])
         choices = [f"{chr(ord('A')+i)}. {opt}" for i, opt in enumerate(choices_raw)]
 
-        lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in question_text) else "en"
+        # Some datasets (e.g. MMLU-Pro) store the question and its options
+        # separately. If the question text does not already contain the
+        # options, render them as a multiple-choice block so the model can
+        # answer by letter — otherwise it never sees the choices.
+        if choices_raw and all(c not in question_text for c in choices):
+            prompt = (
+                f"Question: {question_text}\n"
+                + "  ".join(choices)
+                + "\nAnswer:"
+            )
+        else:
+            prompt = question_text
+
+        lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in prompt) else "en"
         out.append(BenchmarkItem(
             item_id=row["item_id"], category=row.get("category", "fact"),
-            question=question_text, ground_truth=gt,
+            question=prompt, ground_truth=gt,
             choices=choices, language=lang,
         ))
     return out

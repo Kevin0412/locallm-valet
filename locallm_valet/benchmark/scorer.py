@@ -91,8 +91,8 @@ def _extract_mcq_answer(text: str) -> Optional[str]:
 
     # Strategy 1: explicit answer markers
     patterns = [
-        r'(?im)(?:correct\s+)?answer\s*(?:is|:)?\s*\*{0,2}\s*([A-Da-d])\b',
-        r'(?im)(?:option|select|choose)\s*(?:is|:)?\s*\*{0,2}\s*([A-Da-d])\b',
+        r'(?im)(?:correct\s+)?answer\s*(?:is|:)?\s*\*{0,2}\s*([A-Ja-j])\b',
+        r'(?im)(?:option|select|choose)\s*(?:is|:)?\s*\*{0,2}\s*([A-Ja-j])\b',
     ]
     for pat in patterns:
         matches = list(re.finditer(pat, text))
@@ -100,12 +100,12 @@ def _extract_mcq_answer(text: str) -> Optional[str]:
             return matches[-1].group(1).upper()
 
     # Strategy 2: \\boxed{X}
-    boxed = re.findall(r'\\boxed\{([A-Da-d])\}', text)
+    boxed = re.findall(r'\\boxed\{([A-Ja-j])\}', text)
     if boxed:
         return boxed[-1].upper()
 
     # Strategy 3: bold letter
-    bold = re.findall(r'\*\*([A-Da-d])\*\*', text)
+    bold = re.findall(r'\*\*([A-Ja-j])\*\*', text)
     if bold:
         return bold[-1].upper()
 
@@ -113,12 +113,12 @@ def _extract_mcq_answer(text: str) -> Optional[str]:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     for line in reversed(lines):
         # "A", "A.", "A)" etc
-        m = re.match(r'^\s*([A-Da-d])\s*[\.\)]?\s*$', line)
+        m = re.match(r'^\s*([A-Ja-j])\s*[\.\)]?\s*$', line)
         if m:
             return m.group(1).upper()
 
     # Strategy 5: whole response is just a single letter
-    if re.match(r'^[A-Da-d]$', text):
+    if re.match(r'^[A-Ja-j]$', text):
         return text.upper()
 
     return None
