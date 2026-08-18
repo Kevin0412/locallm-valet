@@ -77,9 +77,8 @@ def create_app(
         _AUTH_EXEMPT_PREFIXES = ("/docs", "/redoc", "/openapi.json")
 
         def _check_credentials(request: Request) -> bool:
-            """Accept either ``Authorization: Bearer <key>`` (any configured
-            api key) or ``Authorization: Basic base64(user:pass)`` (when
-            username/password configured)."""
+            """Accept ``Authorization: Bearer <key>``, ``x-api-key: <key>``
+            (Anthropic clients) or ``Authorization: Basic base64(user:pass)``."""
             auth = request.headers.get("authorization", "")
             scheme, _, cred = auth.partition(" ")
             scheme = scheme.lower()
@@ -94,6 +93,8 @@ def create_app(
                 user, _, pw = decoded.partition(":")
                 if user == config.server.username and pw == config.server.password:
                     return True
+            if request.headers.get("x-api-key", "") in config.server.api_keys:
+                return True
             return False
 
         @app.middleware("http")
@@ -140,7 +141,11 @@ def create_app(
             raise InvalidRequest("missing or invalid 'model' field in request body")
         started = time.monotonic()
         is_stream = bool(payload.get("stream"))
-        if is_stream:
+        # Only chat/completions speaks the OpenAI stream_options contract;
+        # Responses (/v1/responses) and Anthropic (/v1/messages) have their
+        # own streaming shape — pass those through verbatim (routing only,
+        # no protocol rewriting).
+        if is_stream and request.url.path == "/v1/chat/completions":
             # The backend only sends the final SSE usage frame when explicitly
             # requested; inject include_usage so our token accounting (and the
             # client, transparently) gets real numbers.
@@ -342,6 +347,8 @@ def create_app(
                 models=[str(m) for m in models],
                 base_url=f"http://127.0.0.1:{config.server.port}/v1",
                 max_tokens=int(payload.get("max_tokens", 256)),
+                sample=payload.get("sample"),
+                concurrency=int(payload.get("concurrency", 4)),
             )
             return job.status()
 
@@ -439,6 +446,10 @@ def _render_benchmark_page(config: Config) -> str:
     <h2 data-i18n="run_title">运行评测</h2>
     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
       <select id="dsSel">{dataset_opts}</select>
+      <input type="number" id="sampleSel" min="0" step="100" placeholder="sample (0=full)" value="" style="width:130px"
+             title="采样条数，0/空 = 全量；有 sample_N_indices.json 时用固定抽样">
+      <input type="number" id="concSel" min="1" max="32" value="4" style="width:70px"
+             title="并发/批大小">
       <select id="modelSel" multiple size="4" style="min-width:240px">
         {model_opts}
       </select>
@@ -506,7 +517,12 @@ async function runBench() {
   const sel = $('modelSel');
   const models = [...sel.selectedOptions].map(o => o.value);
   if (!models.length) models.push(...[...sel.options].map(o => o.value));
-  const payload = { dataset: $('dsSel').value, models };
+  const payload = {
+    dataset: $('dsSel').value,
+    models,
+    sample: parseInt($('sampleSel').value, 10) || null,
+    concurrency: parseInt($('concSel').value, 10) || 4,
+  };
   const r = await authedFetch('/gateway/benchmark/run', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

@@ -32,7 +32,7 @@ logger = logging.getLogger("locallm_valet.benchmark.dataset")
 _SMOKE_JSON = Path(__file__).resolve().parent / "smoke.json"
 
 
-def _get_smoke() -> list[BenchmarkItem]:
+def _get_smoke(sample: int | None = None) -> list[BenchmarkItem]:
     with open(_SMOKE_JSON, "r", encoding="utf-8") as f:
         raw = json.load(f)
     items: list[BenchmarkItem] = []
@@ -54,8 +54,13 @@ def _get_smoke() -> list[BenchmarkItem]:
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "dataset_cache" / "dataset"
 
 
-def _load_processed(name: str) -> tuple[list[dict], Optional[dict]]:
-    """Load processed.json (+ dev_examples.json if present) from cache."""
+def _load_processed(name: str, sample: int | None = None) -> tuple[list[dict], Optional[dict]]:
+    """Load processed.json (+ dev_examples.json if present) from cache.
+
+    ``sample``: when set, use the matching ``sample_{sample}_indices.json``
+    file from the archive if present (fixed, reproducible subset), otherwise
+    random-sample that many items. ``None`` = full dataset.
+    """
     p = _CACHE_DIR / name / "processed.json"
     if not p.is_file():
         raise FileNotFoundError(
@@ -64,6 +69,20 @@ def _load_processed(name: str) -> tuple[list[dict], Optional[dict]]:
         )
     with open(p, "r", encoding="utf-8") as f:
         items: list[dict] = json.load(f)
+
+    if sample is not None and sample > 0 and sample < len(items):
+        # Prefer the fixed sample indices shipped in the archive
+        idx_p = _CACHE_DIR / name / f"sample_{sample}_indices.json"
+        if idx_p.is_file():
+            with open(idx_p, "r", encoding="utf-8") as f:
+                indices: list[int] = json.load(f)
+            indices = [i for i in indices if 0 <= i < len(items)]
+            items = [items[i] for i in indices]
+            logger.info("Sampled %d items via %s", len(items), idx_p.name)
+        else:
+            random.seed(42)
+            items = random.sample(items, sample)
+            logger.info("Random-sampled %d items (seed=42)", len(items))
 
     dev: Optional[dict] = None
     dev_p = _CACHE_DIR / name / "dev_examples.json"
@@ -185,24 +204,24 @@ def _from_generic(items_raw: list[dict]) -> list[BenchmarkItem]:
 # Dataset-specific loaders
 # ---------------------------------------------------------------------------
 
-def _get_mmlu() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("mmlu")
+def _get_mmlu(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("mmlu", sample)
     return _convert(items_raw, dev)
 
-def _get_mmlu_pro() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("mmlu_pro")
+def _get_mmlu_pro(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("mmlu_pro", sample)
     return _convert(items_raw, dev)
 
-def _get_bfcl() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("bfcl")
+def _get_bfcl(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("bfcl", sample)
     return _convert(items_raw, dev)
 
-def _get_mmstar() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("mmstar")
+def _get_mmstar(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("mmstar", sample)
     return _convert(items_raw, dev)
 
-def _get_ocrbench() -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("ocrbench")
+def _get_ocrbench(sample: int | None = None) -> list[BenchmarkItem]:
+    items_raw, dev = _load_processed("ocrbench", sample)
     return _convert(items_raw, dev)
 
 
@@ -220,11 +239,11 @@ _DATASETS: dict[str, callable] = {
 }
 
 
-def get_dataset(name: str = "smoke") -> list[BenchmarkItem]:
+def get_dataset(name: str = "mmlu", sample: int | None = None) -> list[BenchmarkItem]:
     builder = _DATASETS.get(name)
     if builder is None:
         raise KeyError(f"Unknown dataset: {name!r}. Available: {', '.join(list_datasets())}")
-    return builder()
+    return builder(sample)
 
 
 def list_datasets() -> list[str]:

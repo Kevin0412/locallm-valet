@@ -32,6 +32,8 @@ class BenchmarkJob:
     models: list[str] = field(default_factory=list)
     base_url: str = "http://127.0.0.1:8000/v1"
     max_tokens: int = 256
+    sample: Optional[int] = None
+    concurrency: int = 1
     state: str = "idle"          # idle | running | paused | done | error | stopped
     current_model: str = ""
     current_item: int = 0
@@ -49,6 +51,8 @@ class BenchmarkJob:
             "state": self.state,
             "dataset": self.dataset,
             "models": self.models,
+            "sample": self.sample,
+            "concurrency": self.concurrency,
             "current_model": self.current_model,
             "current_item": self.current_item,
             "total_items": self.total_items,
@@ -76,6 +80,8 @@ def start_job(
     models: list[str],
     base_url: str,
     max_tokens: int,
+    sample: Optional[int] = None,
+    concurrency: int = 1,
     output_dir: str = "benchmark_results",
 ) -> BenchmarkJob:
     """Start a benchmark job in a background thread (no-op if already running)."""
@@ -88,6 +94,8 @@ def start_job(
             models=list(models),
             base_url=base_url,
             max_tokens=max_tokens,
+            sample=sample,
+            concurrency=concurrency,
             state="running",
             started_at=time.time(),
             _control=JobControl(),
@@ -107,7 +115,7 @@ def start_job(
 
 def _worker(job: BenchmarkJob, output_dir: str) -> None:
     try:
-        items = get_dataset(job.dataset)
+        items = get_dataset(job.dataset, job.sample)
     except Exception as exc:  # noqa: BLE001 - surfaced via job.error
         logger.exception("benchmark dataset load failed")
         job.state = "error"
@@ -131,6 +139,7 @@ def _worker(job: BenchmarkJob, output_dir: str) -> None:
                 model_name=model_name,
                 base_url=job.base_url,
                 max_tokens=job.max_tokens,
+                concurrency=job.concurrency,
                 control=job._control,
             )
         except Exception as exc:  # noqa: BLE001
