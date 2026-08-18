@@ -59,14 +59,69 @@ class ModelBackendArgs:
 
 
 @dataclass
+class PoolConfig:
+    """A named, probe-able memory source (resource pool).
+
+    Devices differ wildly in how they get memory — shared system RAM (CPU /
+    NPU / iGPU), dedicated VRAM (discrete GPUs), unified memory (Apple
+    Silicon), dedicated HBM (some accelerators), etc. Rather than hardcode a
+    ram/vram dichotomy, every memory source is a *pool* that a slot may
+    consume from. Pools are shared (many slots draw from system_ram) or
+    private (each GPU has its own vram pool).
+
+    kind determines how the pool is probed:
+    - "ram":    system RAM via psutil (cross-platform)
+    - "vram":   VRAM via NVML at ``device_index`` (skip gating when no driver)
+    - "static": no standard API (NPU/HBM/etc.) — use ``total_gib`` and treat
+                "available" as total (no runtime probe available)
+    """
+
+    name: str = ""
+    kind: str = "ram"          # ram | vram | static
+    device_index: int = 0      # vram only: NVML device index
+    total_gib: float = 0.0     # static only: fixed capacity
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("ram", "vram", "static"):
+            raise ConfigError(f"pool '{self.name}': kind must be ram|vram|static")
+
+
+@dataclass
+class SlotConfig:
+    """One execution slot (a device lane that can run a single model at a time).
+
+    Slots are the unit of concurrency: CPU / NPU0 / NPU1 / GPU0 / GPU1 …
+    each owns an independent backend port + state machine, so models on
+    different slots run in parallel. Same-slot models are mutually exclusive
+    (serialized switching).
+
+    ``pools`` maps pool name → reserved GiB this slot always needs beyond the
+    active model's own requirement (e.g. runtime overhead). The active model
+    declares per-pool needs via ``required_pools``.
+    """
+
+    name: str = "cpu"
+    port: int = 30000          # this slot's internal backend port
+    device: str = "CPU"        # display label: CPU / NPU0 / GPU0 …
+    pools: dict[str, float] = field(default_factory=dict)
+    """Extra GiB this slot needs from each pool (runtime overhead)."""
+
+
+@dataclass
 class ModelSpec:
     """One entry of the model registry."""
 
     name: str
     path: str  # local directory or hub id (HF / ModelScope / ...)
+    # Which slot this model runs on. Defaults to the first ram slot ("cpu").
+    slot: str = "cpu"
     # Memory gates. 0 (default) = that resource is not checked.
     required_vram_gib: float = 0.0  # VRAM (checked only when NVML is available)
     required_ram_gib: float = 0.0   # system RAM (psutil, cross-platform)
+    # Per-pool needs, e.g. {"gpu0_vram": 6, "system_ram": 3} — for machines
+    # where a model consumes several pools (VRAM + RAM staging, unified
+    # memory, dedicated HBM…). Pool names must exist under `pools:`.
+    required_pools: dict[str, float] = field(default_factory=dict)
     backend: ModelBackendArgs = field(default_factory=ModelBackendArgs)
 
     def configured_context_length(self) -> int | None:
@@ -159,10 +214,17 @@ class Config:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     idle: IdleConfig = field(default_factory=IdleConfig)
     usage: UsageConfig = field(default_factory=UsageConfig)
+    pools: dict[str, PoolConfig] = field(default_factory=dict)
+    slots: dict[str, SlotConfig] = field(default_factory=dict)
     models: dict[str, ModelSpec] = field(default_factory=dict)
 
     def get_model(self, name: str) -> ModelSpec | None:
         return self.models.get(name)
+
+    def get_slot(self, name: str) -> SlotConfig:
+        """Resolve a model to its slot config (defaults to 'cpu')."""
+        slot_name = self.models.get(name, ModelSpec(name=name, path="")).slot
+        return self.slots.get(slot_name, self.slots.get("cpu", SlotConfig()))
 
 
 def _require_mapping(raw: Any, section: str, path: str) -> dict:
@@ -223,11 +285,21 @@ def _parse_model(name: str, raw: Any) -> ModelSpec:
     if backend_raw is None and "sglang" in data:  # legacy alias
         logger.warning("models.%s: 'sglang:' is deprecated, use 'backend:'", name)
         backend_raw = data["sglang"]
+    slot = str(data.get("slot", "cpu"))
+    required_pools: dict[str, float] = {}
+    rp_raw = data.get("required_pools")
+    if rp_raw is not None:
+        if not isinstance(rp_raw, dict):
+            raise ConfigError(f"models.{name}.required_pools: expected a mapping")
+        for pn, need in rp_raw.items():
+            required_pools[str(pn)] = float(need)
     return ModelSpec(
         name=name,
         path=path,
+        slot=slot,
         required_vram_gib=required_vram,
         required_ram_gib=required_ram,
+        required_pools=required_pools,
         backend=_parse_model_backend(backend_raw, name),
     )
 
@@ -345,11 +417,58 @@ def load_config(path: str | Path | None = None) -> Config:
     cfg.usage.enabled = bool(usage.get("enabled", cfg.usage.enabled))
     cfg.usage.db_path = str(usage.get("db_path", cfg.usage.db_path))
 
+    # Pools: named memory sources (system_ram, gpu0_vram, ...). When absent,
+    # two defaults are implied: "system_ram" (psutil) and "gpu0_vram" (NVML),
+    # so existing configs keep working.
+    pools_raw = _require_mapping(root.get("pools"), "pools", "pools")
+    if pools_raw:
+        for pool_name, pool_raw in pools_raw.items():
+            p = _require_mapping(pool_raw, "pool", f"pools.{pool_name}")
+            cfg.pools[str(pool_name)] = PoolConfig(
+                name=str(pool_name),
+                kind=str(p.get("kind", "ram")),
+                device_index=int(p.get("device_index", 0)),
+                total_gib=float(p.get("total_gib", 0.0)),
+            )
+    else:
+        cfg.pools["system_ram"] = PoolConfig(name="system_ram", kind="ram")
+        cfg.pools["gpu0_vram"] = PoolConfig(name="gpu0_vram", kind="vram", device_index=0)
+
+    # Slots: optional; when absent a single "cpu" slot (the global backend
+    # port) is implied so the config stays backwards compatible.
+    slots_raw = _require_mapping(root.get("slots"), "slots", "slots")
+    if slots_raw:
+        for slot_name, slot_raw in slots_raw.items():
+            s = _require_mapping(slot_raw, "slot", f"slots.{slot_name}")
+            pools_map: dict[str, float] = {}
+            for pool_name, need in (s.get("pools") or {}).items():
+                pools_map[str(pool_name)] = float(need)
+            for pn in pools_map:
+                if pn not in cfg.pools:
+                    raise ConfigError(f"slots.{slot_name}.pools.{pn}: unknown pool (defined: {', '.join(cfg.pools)})")
+            cfg.slots[str(slot_name)] = SlotConfig(
+                name=str(slot_name),
+                port=int(s.get("port", 30000)),
+                device=str(s.get("device", str(slot_name).upper())),
+                pools=pools_map,
+            )
+    else:
+        cfg.slots["cpu"] = SlotConfig(name="cpu", port=cfg.backend.port)
+
     models_raw = _require_mapping(root.get("models"), "models", "models")
     if not models_raw:
         raise ConfigError("models: at least one model is required")
     for name, model_raw in models_raw.items():
-        cfg.models[name] = _parse_model(str(name), model_raw)
+        spec = _parse_model(str(name), model_raw)
+        if spec.slot not in cfg.slots:
+            raise ConfigError(
+                f"models.{name}: slot '{spec.slot}' is not defined under 'slots:' "
+                f"(defined: {', '.join(cfg.slots)})"
+            )
+        for pn in spec.required_pools:
+            if pn not in cfg.pools:
+                raise ConfigError(f"models.{name}.required_pools.{pn}: unknown pool (defined: {', '.join(cfg.pools)})")
+        cfg.models[name] = spec
 
     # Environment overrides win over the YAML file (legacy names fall back).
     cfg.idle.timeout_seconds = _env_float(

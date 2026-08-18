@@ -1,0 +1,81 @@
+# Multi-slot test config — mirrors this machine: CPU + iGPU(ram) + NPU(ram)
+server:
+  host: 127.0.0.1
+  port: 8000
+
+backend:
+  host: 127.0.0.1
+  port: 30000
+  health_path: /health
+  startup_timeout_seconds: 600
+  stop_timeout_seconds: 60
+  command_template: "C:/Users/kaiwen.zhu/llama-local/bin/llama-server.exe -m {model_path} --host {host} --port {port} {extra_args}"
+  env: {}
+
+memory:
+  device: 0
+  safety_margin_gib: 0.0
+  release_timeout_seconds: 120
+  poll_interval_seconds: 1.0
+
+idle:
+  timeout_seconds: 3600
+  check_interval_seconds: 15
+
+usage:
+  enabled: true
+  db_path: data/usage.db
+
+pools:
+  system_ram:
+    kind: ram
+  gpu0_vram:
+    kind: vram
+    device_index: 0
+
+slots:
+  cpu:
+    port: 30000
+    device: CPU
+    pools: {}
+  npu0:
+    port: 30100
+    device: NPU0
+    pools: {system_ram: 0.5}
+  gpu0:
+    port: 30200
+    device: iGPU
+    pools: {system_ram: 0.5}
+
+models:
+  gemma-4-e2b:
+    path: C:\Users\kaiwen.zhu\llama-local\models\gemma-4-E2B_q4_0-it.gguf
+    slot: cpu
+    required_ram_gib: 0
+    backend:
+      extra_args: ["--alias", "gemma-4-e2b", "--ctx-size", 8192]
+
+  Qwen3-1.7B-Q8_0:
+    path: C:\Users\kaiwen.zhu\llama-local\models\Qwen3-1.7B-Q8_0.gguf
+    slot: cpu
+    required_ram_gib: 0
+    backend:
+      extra_args: ["--alias", "Qwen3-1.7B-Q8_0", "--ctx-size", 8192]
+
+  llama-3.2-1b:
+    path: C:\Users\kaiwen.zhu\npu-chat\models\llama-3.2-1b-npu-ov
+    slot: npu0
+    required_ram_gib: 0
+    backend:
+      command_template: "{python} C:/Users/kaiwen.zhu/npu-chat/openai_server.py --model {model_name} --host {host} --port {port} {extra_args}"
+      health_path: /v1/models
+      extra_args: ["--device", "NPU"]
+
+  qwen3-1.7b:
+    path: C:\Users\kaiwen.zhu\npu-chat\models\Qwen3-1.7B-int4-ov
+    slot: gpu0
+    required_ram_gib: 0
+    backend:
+      command_template: "{python} C:/Users/kaiwen.zhu/npu-chat/openai_server.py --model {model_name} --host {host} --port {port} {extra_args}"
+      health_path: /v1/models
+      extra_args: ["--device", "GPU"]

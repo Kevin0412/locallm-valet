@@ -37,12 +37,14 @@ from .benchmark.job import current_job, start_job, pause_job, resume_job, stop_j
 logger = logging.getLogger(__name__)
 
 
-def build_manager(config: Config) -> ModelManager:
-    """Wire the real memory monitor + backend runner into a manager."""
+def build_manager(config: Config):
+    """Wire the pool monitor + per-slot backend runners into a SlotManager.
 
-    memory = MemoryMonitor(config.memory.device)
-    runner = BackendRunner(config.backend, device=config.memory.device)
-    return ModelManager(config, memory, runner)
+    Every slot owns a ModelManager with its own backend port and state
+    machine; shared resource pools gate starts globally.
+    """
+    from .slot_manager import SlotManager
+    return SlotManager(config)
 
 
 def create_app(
@@ -173,39 +175,45 @@ def create_app(
                 logger.exception("usage recording failed for %s", model_name)
 
         await manager.ensure_loaded(model_name)
-        manager.request_started()
+        slot_mgr = manager.get_slot_manager(model_name)
+        base_url = manager.base_url_for(model_name)
+        slot_mgr.request_started()
         if is_stream:
             # proxy.stream owns the finish callback: it fires on send failure
             # or when the SSE stream is fully consumed / closed by the client.
             return await proxy.stream(
                 request.method, request.url.path, request.headers, body,
-                on_finished=manager.request_finished,
+                on_finished=slot_mgr.request_finished,
                 on_usage=record_usage if recorder is not None else None,
+                base_url=base_url,
             )
         try:
-            resp = await proxy.plain(request.method, request.url.path, request.headers, body)
+            resp = await proxy.plain(request.method, request.url.path, request.headers, body,
+                                     base_url=base_url)
             record_usage(extract_usage_from_json(resp.body), resp.status_code)
             return resp
         finally:
-            manager.request_finished()
+            slot_mgr.request_finished()
 
     # ------------------------------------------------------------- /v1
 
     @app.get("/v1/models")
     async def list_models():
         data = []
+        model_status = {m["name"]: m for m in manager.models_status()}
         for name, spec in manager.cfg.models.items():
-            loaded = manager.state is State.RUNNING and manager.current_model == name
+            ms = model_status.get(name, {})
             data.append(
                 {
                     "id": name,
                     "object": "model",
                     "created": 0,
                     "owned_by": "locallm-valet",
+                    "slot": ms.get("slot", spec.slot),
                     # Declared context (from --context-length) vs the real KV
                     # capacity probed at load time (unknown until loaded).
                     "context_length": spec.configured_context_length(),
-                    "max_context_tokens": manager.max_context_tokens if loaded else None,
+                    "max_context_tokens": ms.get("max_context_tokens") if ms.get("loaded") else None,
                 }
             )
         return {"object": "list", "data": data}
@@ -215,26 +223,30 @@ def create_app(
         query = request.url.query
         path_and_query = request.url.path + (f"?{query}" if query else "")
         if request.method == "GET":
-            # No model field in a GET; only forward when something is loaded.
-            if manager.state is State.RUNNING:
-                started = time.monotonic()
-                manager.request_started()
-                try:
-                    resp = await proxy.plain("GET", path_and_query, request.headers, b"")
-                    if recorder is not None:
-                        try:
-                            recorder.record(
-                                model=manager.current_model or "",
-                                endpoint=request.url.path,
-                                stream=False,
-                                status=resp.status_code,
-                                duration_ms=(time.monotonic() - started) * 1000.0,
-                            )
-                        except Exception:  # noqa: BLE001
-                            logger.exception("usage recording failed for GET %s", request.url.path)
-                    return resp
-                finally:
-                    manager.request_finished()
+            # No model field in a GET; forward to the first slot with a loaded
+            # model (multi-slot: any RUNNING slot works for backend-side GETs).
+            for slot_mgr in manager.slots.values():
+                if slot_mgr.state is State.RUNNING and slot_mgr.current_model:
+                    started = time.monotonic()
+                    slot_mgr.request_started()
+                    base_url = f"http://{config.backend.host}:{slot_mgr.runner.cfg.port}"
+                    try:
+                        resp = await proxy.plain("GET", path_and_query, request.headers, b"",
+                                                 base_url=base_url)
+                        if recorder is not None:
+                            try:
+                                recorder.record(
+                                    model=slot_mgr.current_model or "",
+                                    endpoint=request.url.path,
+                                    stream=False,
+                                    status=resp.status_code,
+                                    duration_ms=(time.monotonic() - started) * 1000.0,
+                                )
+                            except Exception:  # noqa: BLE001
+                                logger.exception("usage recording failed for GET %s", request.url.path)
+                        return resp
+                    finally:
+                        slot_mgr.request_finished()
             raise BackendUnavailable("no model loaded; POST with a 'model' field to load one")
 
         body = await request.body()
@@ -255,34 +267,32 @@ def create_app(
     @app.get("/gateway/models")
     async def gateway_models():
         return {
-            "state": manager.state.value,
-            "model": manager.current_model,
+            "slots": {name: {"state": m.state.value, "model": m.current_model}
+                      for name, m in manager.slots.items()},
             "models": manager.models_status(),
         }
 
     @app.post("/gateway/stop")
     async def gateway_stop():
-        """正常关闭：空闲时（任意状态）接受并清显存；正在服务时 503。"""
-        await manager.stop(reason="manual")
-        return {"state": manager.state.value, "model": manager.current_model}
+        """正常关闭所有槽：空闲时（任意状态）接受并清资源；正在服务时 503。"""
+        result = await manager.stop(reason="manual")
+        return {"slots": result}
 
     @app.post("/gateway/force-stop")
     async def gateway_force_stop():
-        """强制关闭：无条件清显存，即使有活跃请求（会切断流式连接）。"""
-        await manager.stop(reason="manual (forced)", force=True)
-        return {
-            "state": manager.state.value,
-            "model": manager.current_model,
-            "active_requests": manager.active_requests,
-        }
+        """强制关闭所有槽：无条件清资源，即使有活跃请求（会切断流式连接）。"""
+        result = await manager.stop(reason="manual (forced)", force=True)
+        return {"slots": result}
 
     @app.post("/gateway/preload/{model_name}")
     async def gateway_preload(model_name: str):
-        await manager.ensure_loaded(model_name)
+        slot_mgr = manager.get_slot_manager(model_name)
+        await slot_mgr.ensure_loaded(model_name)
         return {
-            "state": manager.state.value,
-            "model": manager.current_model,
-            "active_requests": manager.active_requests,
+            "slot": slot_mgr.slot_name,
+            "state": slot_mgr.state.value,
+            "model": slot_mgr.current_model,
+            "active_requests": slot_mgr.active_requests,
         }
 
     # ------------------------------------------------------ usage / dashboard

@@ -50,11 +50,15 @@ class ModelManager:
         memory: MemoryMonitorProtocol,
         runner: BackendRunner,
         clock: Clock = time.monotonic,
+        pool_monitor=None,
+        slot_name: str = "cpu",
     ):
         self.cfg = config
         self.memory = memory
         self.runner = runner
         self._clock = clock
+        self.pool_monitor = pool_monitor
+        self.slot_name = slot_name
 
         self._transition_lock = asyncio.Lock()
         self.state = State.STOPPED
@@ -182,11 +186,17 @@ class ModelManager:
         self.last_activity = self._now()
 
     async def _check_memory(self, spec: ModelSpec, context: str) -> None:
-        """Gate on VRAM (when NVML is available) and/or system RAM.
+        """Gate on resource pools (slots architecture) or, when no pool
+        monitor is configured, on the legacy VRAM/RAM fields.
 
-        - ``required_vram_gib > 0`` → checked only if NVML works; on CPU/NPU
-          machines (no NVIDIA driver) it is skipped with a warning.
-        - ``required_ram_gib > 0`` → checked via psutil (cross-platform).
+        Pool gating:
+        - ``spec.required_pools`` declares per-pool needs; each named pool is
+          checked against its available GiB (shared pools like system_ram are
+          accounted globally across all running slots).
+        - Legacy ``required_vram_gib`` → ``gpu0_vram`` pool (when probeable).
+        - Legacy ``required_ram_gib`` → ``system_ram`` pool.
+        - A pool that cannot be probed (e.g. vram without NVML) is skipped,
+          never hard-failing.
 
         Never hard-start into an OOM: refuse BEFORE launching.
         """
@@ -194,6 +204,36 @@ class ModelManager:
         margin = self.cfg.memory.safety_margin_gib
         problems: list[str] = []
 
+        if self.pool_monitor is not None:
+            needs: dict[str, float] = dict(spec.required_pools)
+            if spec.required_vram_gib > 0:
+                needs.setdefault("gpu0_vram", spec.required_vram_gib)
+            if spec.required_ram_gib > 0:
+                needs.setdefault("system_ram", spec.required_ram_gib)
+            # slot-level overhead per pool
+            slot = self.cfg.slots.get(self.slot_name)
+            for pool_name, overhead in (slot.pools if slot else {}).items():
+                needs[pool_name] = needs.get(pool_name, 0.0) + overhead
+
+            for pool_name, need in needs.items():
+                if need <= 0:
+                    continue
+                if not self.pool_monitor.pool_probeable(pool_name):
+                    logger.warning("model %s needs pool %s but it cannot be probed; gate skipped",
+                                   spec.name, pool_name)
+                    continue
+                free = self.pool_monitor.pool_available_gib(pool_name)
+                needed = need + margin
+                if free < needed:
+                    problems.append(
+                        f"pool '{pool_name}' needs {needed:.1f} GiB ({need:.1f} "
+                        f"required + {margin:.1f} margin), only {free:.1f} GiB available"
+                    )
+            if problems:
+                raise InsufficientMemory(f"cannot {context} model {spec.name!r}: " + "; ".join(problems))
+            return
+
+        # Legacy single-device path (no pool monitor injected)
         if spec.required_vram_gib > 0:
             if self.memory.nvml_available:
                 free = self.memory.vram_free_gib()

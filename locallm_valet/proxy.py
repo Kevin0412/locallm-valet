@@ -61,15 +61,17 @@ class Proxy:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def _send(self, method: str, path_and_query: str, headers: dict, body: bytes, stream: bool):
-        url = f"{self.base_url}/{path_and_query.lstrip('/')}"
+    async def _send(self, method: str, path_and_query: str, headers: dict, body: bytes,
+                    stream: bool, base_url: str | None = None):
+        base = (base_url or self.base_url).rstrip("/")
+        url = f"{base}/{path_and_query.lstrip('/')}"
         request = self._client.build_request(
             method, url, headers=_forward_headers(headers), content=body
         )
         try:
             return await self._client.send(request, stream=stream)
         except httpx.HTTPError as exc:
-            raise BackendUnavailable(f"backend unreachable at {self.base_url}: {exc}") from exc
+            raise BackendUnavailable(f"backend unreachable at {base}: {exc}") from exc
 
     @staticmethod
     def _response_headers(upstream_headers) -> dict:
@@ -79,10 +81,12 @@ class Proxy:
             if k.lower() not in _HOP_BY_HOP and k.lower() != "content-length"
         }
 
-    async def plain(self, method: str, path_and_query: str, headers: dict, body: bytes) -> Response:
+    async def plain(self, method: str, path_and_query: str, headers: dict, body: bytes,
+                    base_url: str | None = None) -> Response:
         """Non-streaming proxy: buffer the upstream response and return it."""
 
-        upstream = await self._send(method, path_and_query, headers, body, stream=False)
+        upstream = await self._send(method, path_and_query, headers, body, stream=False,
+                                    base_url=base_url)
         return Response(
             content=upstream.content,
             status_code=upstream.status_code,
@@ -97,6 +101,7 @@ class Proxy:
         body: bytes,
         on_finished: _RequestFinished,
         on_usage: Callable[[dict | None, int], None] | None = None,
+        base_url: str | None = None,
     ) -> StreamingResponse:
         """Streaming proxy.
 
@@ -111,7 +116,8 @@ class Proxy:
 
         upstream = None
         try:
-            upstream = await self._send(method, path_and_query, headers, body, stream=True)
+            upstream = await self._send(method, path_and_query, headers, body, stream=True,
+                                        base_url=base_url)
         except Exception:
             on_finished()
             raise
