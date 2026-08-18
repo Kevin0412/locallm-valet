@@ -46,6 +46,10 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Max generation tokens per question (default: 256).")
     run_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds (default: 180).")
+    run_p.add_argument("--concurrency", type=int, default=4,
+                       help="Parallel requests (SGLang/vLLM batch well; default 4).")
+    run_p.add_argument("--retries", type=int, default=2,
+                       help="Extra attempts per item on timeout/5xx (default: 2).")
     run_p.add_argument("--api-key", default=None,
                        help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
@@ -66,6 +70,10 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Max generation tokens.")
     cmp_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds.")
+    cmp_p.add_argument("--concurrency", type=int, default=4,
+                       help="Parallel requests per model (default 4).")
+    cmp_p.add_argument("--retries", type=int, default=2,
+                       help="Extra attempts per item on timeout/5xx (default: 2).")
     cmp_p.add_argument("--api-key", default=None,
                        help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
@@ -87,6 +95,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Sample N items (uses sample_N_indices.json when available; default: full).")
     all_p.add_argument("--concurrency", type=int, default=4,
                        help="Parallel requests per model (SGLang/vLLM batch well; default 4).")
+    all_p.add_argument("--retries", type=int, default=2,
+                       help="Extra attempts per item on timeout/5xx (default: 2).")
 
     # -- download --
     dl_p = bench_sub.add_parser("download",
@@ -173,6 +183,8 @@ def main(args: argparse.Namespace) -> int:
             api_key=api_key,
             max_tokens=args.max_tokens,
             timeout_s=args.timeout,
+            concurrency=args.concurrency,
+            retries=args.retries,
         )
         out_path = render_report(
             results=results,
@@ -210,6 +222,8 @@ def main(args: argparse.Namespace) -> int:
                 api_key=api_key,
                 max_tokens=args.max_tokens,
                 timeout_s=args.timeout,
+                concurrency=args.concurrency,
+                retries=args.retries,
             )
             all_results.extend(results)
         out_path = render_report(
@@ -234,6 +248,8 @@ def main(args: argparse.Namespace) -> int:
                 api_key=api_key,
                 max_tokens=args.max_tokens,
                 timeout_s=args.timeout,
+                concurrency=args.concurrency,
+                retries=args.retries,
             )
             all_results.extend(results)
         out_path = render_report(
