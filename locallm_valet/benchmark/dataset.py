@@ -36,7 +36,7 @@ logger = logging.getLogger("locallm_valet.benchmark.dataset")
 _SMOKE_JSON = Path(__file__).resolve().parent / "smoke.json"
 
 
-def _get_smoke() -> list[BenchmarkItem]:
+def _get_smoke(sample: int | None = None) -> list[BenchmarkItem]:
     with open(_SMOKE_JSON, "r", encoding="utf-8") as f:
         raw = json.load(f)
     items: list[BenchmarkItem] = []
@@ -266,7 +266,7 @@ _DATASETS: dict[str, callable] = {
 }
 
 
-def get_dataset(name: str = "smoke", sample: int | None = None) -> list[BenchmarkItem]:
+def get_dataset(name: str = "mmlu", sample: int | None = None) -> list[BenchmarkItem]:
     builder = _DATASETS.get(name)
     if builder is None:
         raise KeyError(f"Unknown dataset: {name!r}. Available: {', '.join(list_datasets())}")

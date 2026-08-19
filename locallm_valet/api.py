@@ -32,6 +32,7 @@ from .proxy import Proxy
 from .runner import BackendRunner
 from .state import State
 from .usage import UsageRecorder, extract_usage_from_json
+from .benchmark.job import current_job, start_job, pause_job, resume_job, stop_job
 
 logger = logging.getLogger(__name__)
 
@@ -72,41 +73,60 @@ def create_app(
 
     app = FastAPI(title="locallm-valet", version=__version__, lifespan=lifespan)
 
-    if config.server.api_keys:
+    if config.server.auth_enabled:
         _AUTH_EXEMPT_PREFIXES = ("/docs", "/redoc", "/openapi.json")
+
+        def _check_credentials(request: Request) -> bool:
+            """Accept ``Authorization: Bearer <key>``, ``x-api-key: <key>``
+            (Anthropic clients) or ``Authorization: Basic base64(user:pass)``."""
+            auth = request.headers.get("authorization", "")
+            scheme, _, cred = auth.partition(" ")
+            scheme = scheme.lower()
+            if scheme == "bearer" and cred.strip() in config.server.api_keys:
+                return True
+            if scheme == "basic" and config.server.username and config.server.password:
+                import base64
+                try:
+                    decoded = base64.b64decode(cred.strip()).decode("utf-8")
+                except Exception:
+                    return False
+                user, _, pw = decoded.partition(":")
+                if user == config.server.username and pw == config.server.password:
+                    return True
+            if request.headers.get("x-api-key", "") in config.server.api_keys:
+                return True
+            return False
 
         @app.middleware("http")
         async def _api_key_auth(request: Request, call_next):
-            """Bearer API-key gate.
+            """Auth gate.
 
-            Protected: every ``/v1/*`` request (the OpenAI-compatible surface)
-            and every write on ``/gateway/*`` (stop / force-stop / preload —
-            the operations that can tear down the service).
+            Protected: every ``/v1/*`` request (the OpenAI-compatible surface,
+            i.e. model access) and every write on ``/gateway/*`` (stop /
+            force-stop / preload / benchmark run — anything that drives model
+            inference or tears the service down).
 
             Open: read-only ``GET /gateway/*`` (status / models / usage /
-            dashboard) — monitoring data is not a secret, so the dashboard
-            works without a key.  Docs pages are exempt (schema only).
+            dashboard / benchmark page & progress) and docs pages.
             """
             path = request.url.path
             if path.startswith(_AUTH_EXEMPT_PREFIXES):
                 return await call_next(request)
             if request.method == "GET" and path.startswith("/gateway/"):
                 return await call_next(request)
-            auth = request.headers.get("authorization", "")
-            token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-            if not token or token not in config.server.api_keys:
-                return JSONResponse(
-                    status_code=401,
-                    content={
-                        "error": {
-                            "type": "authentication_error",
-                            "message": "invalid or missing API key (Authorization: Bearer <key>)",
-                            "code": "invalid_api_key",
-                        }
-                    },
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-            return await call_next(request)
+            if _check_credentials(request):
+                return await call_next(request)
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "invalid or missing credentials (Authorization: Bearer <key> or Basic <user:pass>)",
+                        "code": "invalid_api_key",
+                    }
+                },
+                headers={"WWW-Authenticate": 'Bearer, Basic realm="locallm-valet"'},
+            )
 
     @app.exception_handler(ManagerError)
     async def _manager_error_handler(request: Request, exc: ManagerError):
@@ -126,7 +146,11 @@ def create_app(
             raise InvalidRequest("missing or invalid 'model' field in request body")
         started = time.monotonic()
         is_stream = bool(payload.get("stream"))
-        if is_stream:
+        # Only chat/completions speaks the OpenAI stream_options contract;
+        # Responses (/v1/responses) and Anthropic (/v1/messages) have their
+        # own streaming shape — pass those through verbatim (routing only,
+        # no protocol rewriting).
+        if is_stream and request.url.path == "/v1/chat/completions":
             # The backend only sends the final SSE usage frame when explicitly
             # requested; inject include_usage so our token accounting (and the
             # client, transparently) gets real numbers.
@@ -302,8 +326,48 @@ def create_app(
 
         @app.get("/gateway/benchmark", response_class=HTMLResponse)
         async def gateway_benchmark():
-            """Render a benchmark results page from scored JSONL files in benchmark_results/."""
-            return HTMLResponse(_render_benchmark_page())
+            """Benchmark page (bilingual, one-click run / pause / resume)."""
+            return HTMLResponse(_render_benchmark_page(config))
+
+        @app.get("/gateway/benchmark/status")
+        async def gateway_benchmark_status():
+            """Read-only progress of the current benchmark job."""
+            return current_job().status()
+
+        @app.post("/gateway/benchmark/run")
+        async def gateway_benchmark_run(request: Request):
+            """Start a benchmark job: POST {"dataset": "mmlu", "models": [...]}.
+            Drives model inference — auth-gated (see middleware)."""
+            body = await request.body()
+            try:
+                payload = json.loads(body) if body else {}
+            except ValueError:
+                raise InvalidRequest("request body must be valid JSON") from None
+            dataset = payload.get("dataset", "mmlu")
+            models = payload.get("models")
+            if not isinstance(models, list) or not models:
+                raise InvalidRequest("'models' must be a non-empty list of model names")
+            job = start_job(
+                dataset=dataset,
+                models=[str(m) for m in models],
+                base_url=f"http://127.0.0.1:{config.server.port}/v1",
+                max_tokens=int(payload.get("max_tokens", 256)),
+                sample=payload.get("sample"),
+                concurrency=int(payload.get("concurrency", 1)),
+            )
+            return job.status()
+
+        @app.post("/gateway/benchmark/pause")
+        async def gateway_benchmark_pause():
+            return pause_job().status()
+
+        @app.post("/gateway/benchmark/resume")
+        async def gateway_benchmark_resume():
+            return resume_job().status()
+
+        @app.post("/gateway/benchmark/stop")
+        async def gateway_benchmark_stop():
+            return stop_job().status()
 
         @app.get("/gateway/dashboard", response_class=HTMLResponse)
         async def gateway_dashboard():
@@ -316,119 +380,175 @@ def create_app(
 # Benchmark page rendering
 # ---------------------------------------------------------------------------
 
-def _render_benchmark_page() -> str:
-    """Scan benchmark_results/ for scored JSONL files and render an HTML page
-    with model-by-model accuracy comparison."""
-    import os
+def _render_benchmark_page(config: Config) -> str:
+    """Render the benchmark page from the shared design system: dataset/model
+    picker, one-click run with pause/resume, live progress, results table."""
     from pathlib import Path
+    from collections import defaultdict
 
+    from .frontend import page
+    from .benchmark.dataset import list_datasets
+    from .benchmark.job import current_job
+
+    models = sorted(config.models.keys())
+    datasets = list_datasets()
+    job = current_job().status()
+
+    # Aggregate scored JSONL by model_name
+    rows = ""
     results_dir = Path("benchmark_results")
-    if not results_dir.is_dir():
-        return "<html><body><h1>Benchmark</h1><p>No benchmark results yet. Run <code>python -m locallm_valet benchmark run --model &lt;name&gt;</code> to generate.</p></body></html>"
+    if results_dir.is_dir():
+        ms: dict = defaultdict(lambda: {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]), "lat": [], "tps": []})
+        for f in sorted(results_dir.glob("*_results.jsonl")):
+            for line in f.read_text("utf-8").strip().splitlines():
+                if not line:
+                    continue
+                r = json.loads(line)
+                m = r.get("model_name", "?")
+                ms[m]["t"] += 1
+                if r.get("is_correct") is True:
+                    ms[m]["c"] += 1
+                cat = r.get("category", "?")
+                ms[m]["cat"][cat][0] += 1
+                if r.get("is_correct") is True:
+                    ms[m]["cat"][cat][1] += 1
+                if r.get("latency_ms"):
+                    ms[m]["lat"].append(r["latency_ms"])
+                if r.get("tps"):
+                    ms[m]["tps"].append(r["tps"])
 
-    files = sorted(results_dir.glob("*_results.jsonl"))
-    if not files:
-        return "<html><body><h1>Benchmark</h1><p>No scored JSONL files found in <code>benchmark_results/</code>.</p></body></html>"
+        def _tag(cn: str, pct: float) -> str:
+            cls = "ok" if pct >= 60 else ("warn" if pct >= 30 else "err")
+            return f'<span class="tag {cls}">{cn} {pct:.0f}%</span>'
 
-    rows: list[str] = []
-    for f in files:
-        model_name = f.stem.replace("_results", "")
-        label = model_name  # human-readable, maybe improve later
+        def _row(name: str, s: dict) -> str:
+            acc = round(s["c"] / s["t"] * 100, 1) if s["t"] else 0
+            lat = round(sum(s["lat"]) / len(s["lat"]), 1) if s["lat"] else "-"
+            tps = round(sum(s["tps"]) / len(s["tps"]), 2) if s["tps"] else "-"
+            tags = "".join(
+                _tag(cn, round(c[1] / c[0] * 100, 1))
+                for cn in ("fact", "reasoning", "math", "chinese", "instruction", "coding")
+                if (c := s["cat"].get(cn)) and c[0]
+            )
+            return (f'<tr><td>{name}</td><td class="num" style="font-weight:650">{acc}%</td>'
+                    f'<td class="num">{s["c"]}/{s["t"]}</td><td>{tags}</td>'
+                    f'<td class="num">{lat}</td><td class="num">{tps}</td></tr>')
 
-        total = correct = 0
-        cats: dict[str, dict] = {}
-        latencies: list[float] = []
-        tps_list: list[float] = []
+        rows = "".join(
+            _row(name, s)
+            for name, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
+        )
 
-        for line in f.read_text(encoding="utf-8").strip().splitlines():
-            if not line:
-                continue
-            d = json.loads(line)
-            cat = d.get("category", "?")
-            is_correct = d.get("is_correct")
-            lat = d.get("latency_ms")
-            tps = d.get("tps")
-            total += 1
-            if is_correct is True:
-                correct += 1
-            if cat not in cats:
-                cats[cat] = {"total": 0, "correct": 0}
-            cats[cat]["total"] += 1
-            if is_correct is True:
-                cats[cat]["correct"] += 1
-            if lat is not None:
-                latencies.append(lat)
-            if tps is not None:
-                tps_list.append(tps)
+    model_opts = "".join(f'<option value="{m}">{m}</option>' for m in models)
+    dataset_opts = "".join(f'<option value="{d}"{" selected" if d == "mmlu" else ""}>{d}</option>' for d in datasets)
 
-        acc = round(correct / total * 100, 1) if total else 0
-        avg_lat = round(sum(latencies) / len(latencies), 1) if latencies else "-"
-        avg_tps = round(sum(tps_list) / len(tps_list), 2) if tps_list else "-"
+    body = f"""
+<main>
+  <h1 class="page-title" data-i18n="bm_title">模型评测 Benchmark</h1>
+  <p class="page-sub" data-i18n="bm_sub">基于公认题库（MMLU / MMLU-Pro / BFCL / MMStar / OCRBench）评估模型能力</p>
 
-        # Category breakdown tags
-        cat_tags = ""
-        for cat_name in ("fact", "reasoning", "math", "chinese", "instruction", "coding"):
-            if cat_name not in cats:
-                continue
-            c = cats[cat_name]
-            pct = round(c["correct"] / c["total"] * 100, 1) if c["total"] else 0
-            color = "#3ecf8e" if pct >= 60 else ("#ffb454" if pct >= 30 else "#ff6b6b")
-            cat_tags += f"<span style=\"display:inline-block;padding:1px 8px;border-radius:4px;background:{color}22;color:{color};font-size:12px;margin-right:4px\">{cat_name}&nbsp;{pct}%</span>"
+  <div class="panel">
+    <h2 data-i18n="run_title">运行评测</h2>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <select id="dsSel">{dataset_opts}</select>
+      <input type="number" id="sampleSel" min="0" step="100" placeholder="sample (0=full)" value="" style="width:130px"
+             title="采样条数，0/空 = 全量；有 sample_N_indices.json 时用固定抽样">
+      <input type="number" id="concSel" min="1" max="32" value="1" style="width:70px"
+             title="并发/批大小：llama.cpp 单槽用 1；SGLang/vLLM 等支持并发的后端可调高（如 4-8）">
+      <select id="modelSel" multiple size="4" style="min-width:240px">
+        {model_opts}
+      </select>
+      <span class="muted" data-i18n="model_hint" style="font-size:12px">Ctrl/Shift 多选，留空 = 全部模型</span>
+      <span class="spacer"></span>
+      <button id="runBtn" class="primary" data-i18n="start">开始</button>
+      <button id="pauseBtn" data-i18n="pause">暂停</button>
+      <button id="resumeBtn" data-i18n="resume" disabled>继续</button>
+      <button id="stopBtn" class="danger" data-i18n="stop" disabled>停止</button>
+    </div>
+    <div class="progress" id="progWrap" style="display:none"><i id="progBar"></i></div>
+    <div id="progText" class="muted" style="font-size:12px;margin-top:6px"></div>
+    <div id="jobErr" class="err-text" style="margin-top:6px"></div>
+  </div>
 
-        rows.append(f"""<tr>
-<td style="font-weight:600">{label}</td>
-<td style="text-align:center;font-weight:700;font-size:18px">{acc}%</td>
-<td style="text-align:center">{correct}/{total}</td>
-<td>{cat_tags}</td>
-<td style="text-align:center">{avg_lat}</td>
-<td style="text-align:center">{avg_tps}</td>
-<td><a href="{f.name.replace('_results.jsonl','_report.md').replace('.jsonl','')}" style="color:var(--accent)" target="_blank">report</a></td>
-</tr>""")
+  <div class="panel">
+    <h2 data-i18n="results_title">评测结果</h2>
+    <table>
+      <thead><tr>
+        <th data-i18n="model">模型</th>
+        <th class="num" data-i18n="accuracy">准确率</th>
+        <th class="num" data-i18n="correct_total">正确/总数</th>
+        <th data-i18n="category">分项</th>
+        <th class="num" data-i18n="avg_lat">平均耗时 ms</th>
+        <th class="num" data-i18n="avg_tps">吞吐 tok/s</th>
+      </tr></thead>
+      <tbody id="resultsBody">{rows or '<tr><td colspan="6" class="empty" data-i18n="empty">暂无数据</td></tr>'}</tbody>
+    </table>
+  </div>
+</main>
+"""
+    return page("模型评测", "Benchmark", active="benchmark", body=body,
+                extra_js=_benchmark_js())
 
-    # Also link to any comparison report
-    compare_link = ""
-    compare_files = list(results_dir.glob("*_comparison.md"))
-    if compare_files:
-        compare_link = f"""<p style="margin-top:16px">📊 <a href="{compare_files[-1].name}" target="_blank" style="color:var(--accent)">Cross-model comparison report</a></p>"""
 
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>locallm-valet · Benchmark</title>
-<style>
-* {{box-sizing:border-box;margin:0;padding:0}}
-body {{background:#0f1115;color:#e6e8ee;font:14px/1.5 "SF Mono",Consolas,"Microsoft YaHei",monospace;padding:20px}}
-h1 {{font-size:18px;margin-bottom:12px}}
-p, ol {{margin-bottom:12px;color:#8b93a3}}
-code {{background:#1e222c;padding:1px 6px;border-radius:4px;font-size:13px}}
-a {{color:#4f8cff;text-decoration:none}}
-a:hover {{text-decoration:underline}}
-table {{width:100%;border-collapse:collapse;font-size:13px}}
-th, td {{text-align:left;padding:8px 10px;border-bottom:1px solid #262b36;white-space:nowrap}}
-th {{color:#8b93a3;font-weight:600}}
-tr:hover {{background:#171a21}}
-</style>
-</head>
-<body>
-<h1>📊 Benchmark Results</h1>
-<p>Run via <code>python -m locallm_valet benchmark run/compare --model ...</code> — see README for details.</p>
-<table>
-<thead><tr>
-<th>Model</th><th style="text-align:center">Accuracy</th><th style="text-align:center">Correct/Total</th>
-<th>Category Breakdown</th><th style="text-align:center">Avg Latency</th><th style="text-align:center">Avg TPS</th><th>Report</th>
-</tr></thead>
-<tbody>
-{''.join(rows)}
-</tbody>
-</table>
-{compare_link}
-<ol style="padding-left:20px">
-<li>Run once: <code>python -m locallm_valet benchmark run --model &lt;name&gt; --dataset builtin</code></li>
-<li>Compare across quantizations: <code>python -m locallm_valet benchmark compare --models Q4 Q8 --labels "Q4_K_M" "Q8_0"</code></li>
-<li>Refresh this page to see updated results.</li>
-</ol>
-</body>
-</html>"""
+def _benchmark_js() -> str:
+    return r"""
+let jobTimer = null;
+async function refreshJob() {
+  try {
+    const r = await authedFetch('/gateway/benchmark/status');
+    const j = await r.json();
+    const wrap = $('progWrap'), bar = $('progBar'), txt = $('progText');
+    const runBtn = $('runBtn'), pauseBtn = $('pauseBtn'), resumeBtn = $('resumeBtn'), stopBtn = $('stopBtn');
+    if (j.state === 'running' || j.state === 'paused') {
+      wrap.style.display = 'block';
+      const pct = j.total_items ? Math.round(100 * j.done_items / j.total_items) : 0;
+      bar.style.width = pct + '%';
+      txt.textContent = (j.state === 'paused' ? i18n('paused') : i18n('running')) +
+        ' · ' + j.dataset + ' · ' + j.current_model + ' · ' + j.done_items + '/' + j.total_items;
+      runBtn.disabled = true; pauseBtn.disabled = (j.state !== 'running');
+      resumeBtn.disabled = (j.state !== 'paused'); stopBtn.disabled = false;
+    } else if (j.state === 'done' || j.state === 'stopped' || j.state === 'error') {
+      wrap.style.display = 'block';
+      bar.style.width = '100%';
+      txt.textContent = j.state.toUpperCase() + (j.error ? ' · ' + j.error : '');
+      runBtn.disabled = false; pauseBtn.disabled = true; resumeBtn.disabled = true; stopBtn.disabled = true;
+      if (j.state === 'done' || j.state === 'stopped') { location.reload(); }
+      clearInterval(jobTimer); jobTimer = null;
+    }
+  } catch (e) {}
+}
+
+async function runBench() {
+  const sel = $('modelSel');
+  const models = [...sel.selectedOptions].map(o => o.value);
+  if (!models.length) models.push(...[...sel.options].map(o => o.value));
+  const payload = {
+    dataset: $('dsSel').value,
+    models,
+    sample: parseInt($('sampleSel').value, 10) || null,
+    concurrency: parseInt($('concSel').value, 10) || 4,
+  };
+  const r = await authedFetch('/gateway/benchmark/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    $('jobErr').textContent = (d.error && d.error.message) || 'HTTP ' + r.status;
+    return;
+  }
+  $('jobErr').textContent = '';
+  refreshJob();
+  jobTimer = setInterval(refreshJob, 2000);
+}
+
+$('runBtn').onclick = runBench;
+$('pauseBtn').onclick = async () => { await authedFetch('/gateway/benchmark/pause', { method: 'POST' }); refreshJob(); };
+$('resumeBtn').onclick = async () => { await authedFetch('/gateway/benchmark/resume', { method: 'POST' }); refreshJob(); };
+$('stopBtn').onclick = async () => { await authedFetch('/gateway/benchmark/stop', { method: 'POST' }); refreshJob(); };
+refreshJob();
+jobTimer = setInterval(refreshJob, 3000);
+"""
 
 
 def _make_default_app() -> FastAPI | None:

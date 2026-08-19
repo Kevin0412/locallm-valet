@@ -182,7 +182,7 @@ async def test_dashboard_page(stack):
     resp = await client.get("/gateway/dashboard")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
-    assert "用量看板" in resp.text
+    assert "用量总览" in resp.text  # new bilingual frontend (frontend.py)
 
 
 async def test_usage_disabled_no_endpoints():

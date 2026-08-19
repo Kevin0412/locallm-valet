@@ -102,6 +102,16 @@ class ServerConfig:
     # Accepted API keys (``Authorization: Bearer <key>``). Empty = auth
     # disabled (open access). Multiple keys allowed.
     api_keys: list[str] = field(default_factory=list)
+    # Optional username/password (``Authorization: Basic base64(user:pass)``).
+    # When set, model access (v1/*) and benchmark runs require it — in
+    # addition to or instead of api_keys. Env: LOCALLM_VALET_USERNAME /
+    # LOCALLM_VALET_PASSWORD.
+    username: str = ""
+    password: str = ""
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.api_keys) or bool(self.username and self.password)
 
 
 @dataclass
@@ -311,6 +321,9 @@ def load_config(path: str | Path | None = None) -> Config:
         else:
             raise ConfigError("server.api_key: expected a string or a list of strings")
 
+    cfg.server.username = str(server.get("username", "") or "")
+    cfg.server.password = str(server.get("password", "") or "")
+
     backend_raw = root.get("backend")
     if backend_raw is None and "sglang" in root:  # legacy alias
         logger.warning("'sglang:' section is deprecated, use 'backend:'")
@@ -382,6 +395,13 @@ def load_config(path: str | Path | None = None) -> Config:
     env_api_key = _env_first("LOCALLM_VALET_API_KEY", ("LLM_GATEWAY_API_KEY", "SGLANG_MANAGER_API_KEY"))
     if env_api_key:
         cfg.server.api_keys = [k.strip() for k in env_api_key.split(",") if k.strip()]
+
+    cfg.server.username = _env_first(
+        "LOCALLM_VALET_USERNAME", ("LLM_GATEWAY_USERNAME",)
+    ) or cfg.server.username
+    cfg.server.password = _env_first(
+        "LOCALLM_VALET_PASSWORD", ("LLM_GATEWAY_PASSWORD",)
+    ) or cfg.server.password
 
     if cfg.idle.timeout_seconds <= 0:
         raise ConfigError("idle.timeout_seconds must be > 0")

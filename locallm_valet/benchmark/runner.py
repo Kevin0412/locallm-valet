@@ -85,8 +85,16 @@ def _run_one(
     retries: int,
     save_responses: bool,
     total: int,
+    control: JobControl | None = None,
 ) -> BenchmarkResult:
     """Run a single benchmark item (directly, or via the thread pool)."""
+    if control is not None:
+        control.wait_if_paused()
+        if control.cancel:
+            result = BenchmarkResult(item=item, model_name=model_name)
+            result.raw_response = "[CANCELLED]"
+            result.score_detail = "cancelled by user before request"
+            return result
     messages = [{"role": "user", "content": item.question}]
     t0 = time.monotonic()
     result = BenchmarkResult(item=item, model_name=model_name)
@@ -163,6 +171,28 @@ def _run_one(
     return result
 
 
+class JobControl:
+    """Cooperative pause/cancel flags for a benchmark job.
+
+    The runner checks these between items so the web UI can pause, resume
+    or stop a long benchmark run without killing the process.
+    """
+
+    __slots__ = ("paused", "cancel")
+
+    def __init__(self) -> None:
+        self.paused = False
+        self.cancel = False
+
+    def wait_if_paused(self) -> None:
+        """Block while paused (checks cancellation too)."""
+        import time as _t
+        while self.paused:
+            if self.cancel:
+                return
+            _t.sleep(0.2)
+
+
 def run_benchmark(
     *,
     items: list[BenchmarkItem],
@@ -175,6 +205,7 @@ def run_benchmark(
     concurrency: int = 1,
     retries: int = 2,
     save_responses: bool = True,
+    control: JobControl | None = None,
 ) -> list[BenchmarkResult]:
     """Run a list of benchmark items through the valet API.
 
@@ -191,6 +222,7 @@ def run_benchmark(
             retryable 5xx (0 = no retries). Retrying keeps slow local models
             from silently dropping questions.
         save_responses: If True, record raw response text in the result.
+        control: Optional JobControl for pause/resume/stop from the web UI.
 
     Returns:
         List of BenchmarkResult, one per item, in the original item order.
@@ -198,25 +230,32 @@ def run_benchmark(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-
     chat_url = f"{base_url.rstrip('/')}/chat/completions"
     total = len(items)
 
     def run_one(item: BenchmarkItem) -> BenchmarkResult:
         return _run_one(
             item, model_name, chat_url, headers, max_tokens, temperature,
-            timeout_s, retries, save_responses, total,
+            timeout_s, retries, save_responses, total, control,
         )
 
     if concurrency <= 1:
-        return [run_one(item) for item in items]
+        results: list[BenchmarkResult] = []
+        for idx, item in enumerate(items):
+            if control is not None and control.cancel:
+                logger.info("job cancelled at item %d, stopping", idx)
+                break
+            results.append(run_one(item))
+        return results
 
     results: list[Optional[BenchmarkResult]] = [None] * total
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-        future_to_idx = {
-            pool.submit(run_one, item): idx
-            for idx, item in enumerate(items)
-        }
+        future_to_idx: dict = {}
+        for idx, item in enumerate(items):
+            if control is not None and control.cancel:
+                logger.info("job cancelled at item %d, stopping", idx)
+                break
+            future_to_idx[pool.submit(run_one, item)] = idx
         done = 0
         for fut in concurrent.futures.as_completed(future_to_idx):
             idx = future_to_idx[fut]

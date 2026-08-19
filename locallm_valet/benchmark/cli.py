@@ -38,8 +38,10 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     run_p = bench_sub.add_parser("run", help="Run benchmark on one model")
     run_p.add_argument("--model", required=True,
                        help="Model registry name (as the valet knows it).")
-    run_p.add_argument("--dataset", default="smoke",
-                       help=f"Dataset name (default: builtin). Available: {', '.join(list_datasets())}")
+    run_p.add_argument("--dataset", default="mmlu",
+                       help=f"Dataset name (default: mmlu). Available: {', '.join(list_datasets())}")
+    run_p.add_argument("--sample", type=int, default=None,
+                       help="Sample N items (uses sample_N_indices.json when available; default: full).")
     run_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
     run_p.add_argument("--output-dir", default="benchmark_results",
@@ -63,8 +65,10 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Two or more model registry names to compare.")
     cmp_p.add_argument("--labels", nargs="*", default=None,
                        help="Human-readable labels for each model (same order).")
-    cmp_p.add_argument("--dataset", default="smoke",
-                       help=f"Dataset name (default: builtin).")
+    cmp_p.add_argument("--dataset", default="mmlu",
+                       help=f"Dataset name (default: mmlu).")
+    cmp_p.add_argument("--sample", type=int, default=None,
+                       help="Sample N items.")
     cmp_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL.")
     cmp_p.add_argument("--output-dir", default="benchmark_results",
@@ -83,8 +87,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
 
     # -- all --
     all_p = bench_sub.add_parser("all", help="Run benchmark on EVERY registered model and produce cross-model comparison")
-    all_p.add_argument("--dataset", default="smoke",
-                       help=f"Dataset name (default: builtin). Available: {', '.join(list_datasets())}")
+    all_p.add_argument("--dataset", default="mmlu",
+                       help=f"Dataset name (default: mmlu). Available: {', '.join(list_datasets())}")
     all_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
     all_p.add_argument("--output-dir", default="benchmark_results",
@@ -212,7 +216,8 @@ def main(args: argparse.Namespace) -> int:
         print(f"Unknown dataset: {args.dataset}", file=sys.stderr)
         print(f"Available: {', '.join(list_datasets())}", file=sys.stderr)
         return 1
-    logger.info("Loaded %d items from dataset '%s'", len(items), args.dataset)
+    logger.info("Loaded %d items from dataset '%s' (sample=%s)",
+                len(items), args.dataset, getattr(args, "sample", None))
 
     if args.bench_cmd == "run":
         logger.info("Benchmark run — model=%s  dataset=%s  base_url=%s",
