@@ -394,28 +394,35 @@ def _render_benchmark_page(config: Config) -> str:
     datasets = list_datasets()
     job = current_job().status()
 
-    # Aggregate scored JSONL by model_name
-    rows = ""
+    # Aggregate scored JSONL by (dataset, model_name) — one table per dataset,
+    # so mmlu (500) / mmlu_pro (500) / smoke (6) are never merged into a
+    # misleading "1006 题" figure with mixed category distributions.
+    tables = ""
     results_dir = Path("benchmark_results")
     if results_dir.is_dir():
-        ms: dict = defaultdict(lambda: {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]), "lat": [], "tps": []})
+        from collections import OrderedDict
+        by_ds: dict = OrderedDict()
         for f in sorted(results_dir.glob("*_results.jsonl")):
+            ds = f.name.removesuffix("_results.jsonl")
             for line in f.read_text("utf-8").strip().splitlines():
                 if not line:
                     continue
                 r = json.loads(line)
                 m = r.get("model_name", "?")
-                ms[m]["t"] += 1
+                s = by_ds.setdefault(ds, {}).setdefault(
+                    m, {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]), "lat": [], "tps": []}
+                )
+                s["t"] += 1
                 if r.get("is_correct") is True:
-                    ms[m]["c"] += 1
+                    s["c"] += 1
                 cat = r.get("category", "?")
-                ms[m]["cat"][cat][0] += 1
+                s["cat"][cat][0] += 1
                 if r.get("is_correct") is True:
-                    ms[m]["cat"][cat][1] += 1
+                    s["cat"][cat][1] += 1
                 if r.get("latency_ms"):
-                    ms[m]["lat"].append(r["latency_ms"])
+                    s["lat"].append(r["latency_ms"])
                 if r.get("tps"):
-                    ms[m]["tps"].append(r["tps"])
+                    s["tps"].append(r["tps"])
 
         def _tag(cn: str, pct: float) -> str:
             cls = "ok" if pct >= 60 else ("warn" if pct >= 30 else "err")
@@ -434,10 +441,27 @@ def _render_benchmark_page(config: Config) -> str:
                     f'<td class="num">{s["c"]}/{s["t"]}</td><td>{tags}</td>'
                     f'<td class="num">{lat}</td><td class="num">{tps}</td></tr>')
 
-        rows = "".join(
-            _row(name, s)
-            for name, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
-        )
+        def _table(ds: str, ms: dict) -> str:
+            per_model = max((s["t"] for s in ms.values()), default=0)
+            n_models = len(ms)
+            body_rows = "".join(
+                _row(name, s)
+                for name, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
+            )
+            empty = '<tr><td colspan="6" class="empty">暂无数据</td></tr>'
+            head = ("<thead><tr>"
+                    '<th data-i18n="model">模型</th><th class="num" data-i18n="accuracy">准确率</th>'
+                    '<th class="num" data-i18n="correct_total">正确/总数</th><th data-i18n="category">分项</th>'
+                    '<th class="num" data-i18n="avg_lat">平均耗时 ms</th><th class="num" data-i18n="avg_tps">吞吐 tok/s</th>'
+                    "</tr></thead>")
+            label = f"{per_model} 题 × {n_models} 模型" if per_model else "暂无数据"
+            return (
+                f'<h3 style="margin:18px 0 6px;font-size:15px">{ds} '
+                f'<span class="muted" style="font-size:12px">({label})</span></h3>'
+                f'<table>{head}<tbody>{body_rows or empty}</tbody></table>'
+            )
+
+        tables = "".join(_table(ds, ms) for ds, ms in by_ds.items())
 
     model_opts = "".join(f'<option value="{m}">{m}</option>' for m in models)
     dataset_opts = "".join(f'<option value="{d}"{" selected" if d == "mmlu" else ""}>{d}</option>' for d in datasets)
@@ -472,17 +496,7 @@ def _render_benchmark_page(config: Config) -> str:
 
   <div class="panel">
     <h2 data-i18n="results_title">评测结果</h2>
-    <table>
-      <thead><tr>
-        <th data-i18n="model">模型</th>
-        <th class="num" data-i18n="accuracy">准确率</th>
-        <th class="num" data-i18n="correct_total">正确/总数</th>
-        <th data-i18n="category">分项</th>
-        <th class="num" data-i18n="avg_lat">平均耗时 ms</th>
-        <th class="num" data-i18n="avg_tps">吞吐 tok/s</th>
-      </tr></thead>
-      <tbody id="resultsBody">{rows or '<tr><td colspan="6" class="empty" data-i18n="empty">暂无数据</td></tr>'}</tbody>
-    </table>
+    {tables or '<p class="empty" data-i18n="empty">暂无数据</p>'}
   </div>
 </main>
 """
