@@ -5,7 +5,7 @@ server:
 
 backend:
   host: 127.0.0.1
-  port: 30000
+  port: 31000
   health_path: /health
   startup_timeout_seconds: 600
   stop_timeout_seconds: 60
@@ -35,15 +35,15 @@ pools:
 
 slots:
   cpu:
-    port: 30000
+    port: 31000
     device: CPU
     pools: {}
   npu0:
-    port: 30100
+    port: 31100
     device: NPU0
     pools: {system_ram: 0.5}
   gpu0:
-    port: 30200
+    port: 31200
     device: iGPU
     pools: {system_ram: 0.5}
 

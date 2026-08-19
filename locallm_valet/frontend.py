@@ -137,7 +137,7 @@ const T = {
     start: '开始', pause: '暂停', resume: '继续', stop: '停止',
     results_title: '评测结果', accuracy: '准确率', correct_total: '正确/总数',
     category: '分项', avg_lat: '平均耗时 ms', avg_tps: '吞吐 tok/s',
-    running: '运行中', paused: '已暂停',
+    running: '运行中', paused: '已暂停', select_all: '全选', select_none: '清空',
   },
   en: {
     dashboard: 'Dashboard', benchmark: 'Benchmark', theme_dark: 'Dark', theme_light: 'Light',
@@ -152,7 +152,7 @@ const T = {
     start: 'Start', pause: 'Pause', resume: 'Resume', stop: 'Stop',
     results_title: 'Results', accuracy: 'Accuracy', correct_total: 'Correct/Total',
     category: 'Breakdown', avg_lat: 'Avg Latency ms', avg_tps: 'Throughput tok/s',
-    running: 'Running', paused: 'Paused',
+    running: 'Running', paused: 'Paused', select_all: 'Select All', select_none: 'Clear',
   },
 };
 const i18n = key => (T[lang()] && T[lang()][key]) || key;

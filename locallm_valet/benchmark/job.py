@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Benchmark job runner — runs a benchmark in a background thread so the web
+"""Benchmark job runner — runs a benchmark in background threads so the web
 UI can start / pause / resume / stop it and poll progress.
 
-Only one job runs at a time (single device, single active model — a core V1
-constraint, same as the valet itself).
+Concurrency model (multi-slot): models are grouped by their slot; each slot
+runs on its own worker thread, and within a slot models are serialized (the
+slot's single backend can hold one model at a time). Different slots run in
+parallel — CPU / NPU / GPU models benchmark simultaneously, matching the
+valet's multi-slot serving architecture.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import json
 import logging
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -83,8 +87,14 @@ def start_job(
     sample: Optional[int] = None,
     concurrency: int = 1,
     output_dir: str = "benchmark_results",
+    slot_of: Optional[dict] = None,
 ) -> BenchmarkJob:
-    """Start a benchmark job in a background thread (no-op if already running)."""
+    """Start a benchmark job in background threads (no-op if already running).
+
+    ``slot_of``: optional mapping model_name → slot_name, used to group models
+    for cross-slot parallel execution. When absent, all models run serially on
+    one worker (single-slot behaviour).
+    """
     global _JOB
     with _LOCK:
         if _JOB.running():
@@ -104,7 +114,7 @@ def start_job(
         _JOB = job
         thread = threading.Thread(
             target=_worker,
-            args=(job, output_dir),
+            args=(job, output_dir, slot_of or {}),
             name="benchmark-job",
             daemon=True,
         )
@@ -113,7 +123,7 @@ def start_job(
         return job
 
 
-def _worker(job: BenchmarkJob, output_dir: str) -> None:
+def _worker(job: BenchmarkJob, output_dir: str, slot_of: dict) -> None:
     try:
         items = get_dataset(job.dataset, job.sample)
     except Exception as exc:  # noqa: BLE001 - surfaced via job.error
@@ -124,15 +134,47 @@ def _worker(job: BenchmarkJob, output_dir: str) -> None:
         return
 
     job.total_items = len(items) * len(job.models)
-    all_results: list[BenchmarkResult] = []
 
+    # Group models by slot: each slot runs on its own thread (parallel across
+    # slots, serialized within a slot). Without slot info, everything lands in
+    # one "cpu" group — single-worker serial behaviour.
+    groups: dict[str, list[str]] = defaultdict(list)
     for model_name in job.models:
+        groups[slot_of.get(model_name, "cpu")].append(model_name)
+
+    threads = []
+    for slot_name, slot_models in groups.items():
+        t = threading.Thread(
+            target=_slot_worker,
+            args=(job, slot_name, slot_models, items, output_dir),
+            name=f"benchmark-slot-{slot_name}",
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+        logger.info("benchmark slot thread started: %s (%d models)", slot_name, len(slot_models))
+
+    for t in threads:
+        t.join()
+
+    if job.state not in ("stopped", "error"):
+        job.state = "done"
+    job.finished_at = time.time()
+    logger.info("benchmark job finished: state=%s total_results=%d",
+                job.state, len(job._results))
+
+
+def _slot_worker(job: BenchmarkJob, slot_name: str, models: list[str],
+                 items: list[BenchmarkItem], output_dir: str) -> None:
+    """Run one slot's models serially (the slot backend holds one at a time);
+    multiple slots run concurrently."""
+    for model_name in models:
         if job._control.cancel:
             job.state = "stopped"
-            break
+            return
         job.current_model = model_name
         job.current_item = 0
-        logger.info("benchmark job: model=%s items=%d", model_name, len(items))
+        logger.info("benchmark job [%s]: model=%s items=%d", slot_name, model_name, len(items))
         try:
             results = run_benchmark(
                 items=items,
@@ -146,7 +188,7 @@ def _worker(job: BenchmarkJob, output_dir: str) -> None:
             logger.exception("benchmark model run failed: %s", model_name)
             job.state = "error"
             job.error = f"{model_name}: {exc}"
-            break
+            return
 
         for r in results:
             if r.is_correct is None:
@@ -154,8 +196,9 @@ def _worker(job: BenchmarkJob, output_dir: str) -> None:
                     score_result(r)
                 except Exception:  # noqa: BLE001
                     r.is_correct = False
-        all_results.extend(results)
-        job.done_items += len(results)
+        with _LOCK:
+            job._results.extend(results)
+            job.done_items += len(results)
         # Persist per-model immediately so partial results are visible while
         # the rest of the run continues.
         try:
@@ -165,21 +208,7 @@ def _worker(job: BenchmarkJob, output_dir: str) -> None:
             job.error = job.error or f"save {model_name}: {exc}"
         if job._control.cancel:
             job.state = "stopped"
-            break
-
-    job._results = all_results
-
-    # Persist results regardless of stop/cancel
-    try:
-        _save_results(job, all_results, output_dir)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("benchmark save failed")
-        job.error = job.error or f"save: {exc}"
-
-    if job.state not in ("stopped", "error"):
-        job.state = "done"
-    job.finished_at = time.time()
-    logger.info("benchmark job finished: state=%s results=%d", job.state, len(all_results))
+            return
 
 
 def _save_results(job: BenchmarkJob, results: list[BenchmarkResult], output_dir: str) -> None:

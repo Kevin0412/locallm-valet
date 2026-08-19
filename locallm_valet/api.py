@@ -359,6 +359,7 @@ def create_app(
                 max_tokens=int(payload.get("max_tokens", 256)),
                 sample=payload.get("sample"),
                 concurrency=int(payload.get("concurrency", 1)),
+                slot_of={m: config.models[m].slot for m in models if m in config.models},
             )
             return job.status()
 
@@ -444,7 +445,22 @@ def _render_benchmark_page(config: Config) -> str:
             for name, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
         )
 
-    model_opts = "".join(f'<option value="{m}">{m}</option>' for m in models)
+    # Group models by slot for a friendlier selector
+    from collections import defaultdict as _dd
+    slot_models: dict = _dd(list)
+    for m in models:
+        slot_models[config.models[m].slot].append(m)
+
+    slot_blocks = []
+    for slot_name in sorted(slot_models):
+        opts = "".join(
+            f'<label class="bm-model" title="{slot_name}"><input type="checkbox" name="bmModel" value="{m}">{m}</label>'
+            for m in slot_models[slot_name]
+        )
+        slot_blocks.append(
+            f'<div class="bm-slot"><div class="bm-slot-name">{slot_name}</div><div class="bm-slot-models">{opts}</div></div>'
+        )
+    model_picker = "".join(slot_blocks)
     dataset_opts = "".join(f'<option value="{d}"{" selected" if d == "mmlu" else ""}>{d}</option>' for d in datasets)
 
     body = f"""
@@ -460,16 +476,15 @@ def _render_benchmark_page(config: Config) -> str:
              title="采样条数，0/空 = 全量；有 sample_N_indices.json 时用固定抽样">
       <input type="number" id="concSel" min="1" max="32" value="1" style="width:70px"
              title="并发/批大小：llama.cpp 单槽用 1；SGLang/vLLM 等支持并发的后端可调高（如 4-8）">
-      <select id="modelSel" multiple size="4" style="min-width:240px">
-        {model_opts}
-      </select>
-      <span class="muted" data-i18n="model_hint" style="font-size:12px">Ctrl/Shift 多选，留空 = 全部模型</span>
       <span class="spacer"></span>
+      <button id="selectAllBtn" class="icon-btn" data-i18n="select_all">全选</button>
+      <button id="selectNoneBtn" class="icon-btn" data-i18n="select_none">清空</button>
       <button id="runBtn" class="primary" data-i18n="start">开始</button>
       <button id="pauseBtn" data-i18n="pause">暂停</button>
       <button id="resumeBtn" data-i18n="resume" disabled>继续</button>
       <button id="stopBtn" class="danger" data-i18n="stop" disabled>停止</button>
     </div>
+    <div class="bm-picker">{model_picker}</div>
     <div class="progress" id="progWrap" style="display:none"><i id="progBar"></i></div>
     <div id="progText" class="muted" style="font-size:12px;margin-top:6px"></div>
     <div id="jobErr" class="err-text" style="margin-top:6px"></div>
@@ -490,6 +505,16 @@ def _render_benchmark_page(config: Config) -> str:
     </table>
   </div>
 </main>
+<style>
+.bm-picker {{ display:flex; flex-direction:column; gap:6px; margin-top:12px; }}
+.bm-slot {{ display:flex; align-items:flex-start; gap:10px; }}
+.bm-slot-name {{ min-width:70px; font-size:12px; color:var(--fg-3); padding-top:3px; }}
+.bm-slot-models {{ display:flex; flex-wrap:wrap; gap:6px; }}
+.bm-model {{ display:inline-flex; align-items:center; gap:5px; background:var(--bg-soft);
+  border:1px solid var(--border-soft); border-radius:6px; padding:4px 9px; font-size:12px; cursor:pointer; }}
+.bm-model:hover {{ border-color:var(--accent); }}
+.bm-model input {{ accent-color: var(--accent); }}
+</style>
 """
     return page("模型评测", "Benchmark", active="benchmark", body=body,
                 extra_js=_benchmark_js())
@@ -524,14 +549,14 @@ async function refreshJob() {
 }
 
 async function runBench() {
-  const sel = $('modelSel');
-  const models = [...sel.selectedOptions].map(o => o.value);
-  if (!models.length) models.push(...[...sel.options].map(o => o.value));
+  const boxes = document.querySelectorAll('input[name="bmModel"]:checked');
+  const models = [...boxes].map(b => b.value);
+  if (!models.length) models.push(...document.querySelectorAll('input[name="bmModel"]')).map(b => b.value);
   const payload = {
     dataset: $('dsSel').value,
     models,
     sample: parseInt($('sampleSel').value, 10) || null,
-    concurrency: parseInt($('concSel').value, 10) || 4,
+    concurrency: parseInt($('concSel').value, 10) || 1,
   };
   const r = await authedFetch('/gateway/benchmark/run', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -547,6 +572,11 @@ async function runBench() {
   jobTimer = setInterval(refreshJob, 2000);
 }
 
+function setAllModels(checked) {
+  document.querySelectorAll('input[name="bmModel"]').forEach(b => b.checked = checked);
+}
+$('selectAllBtn').onclick = () => setAllModels(true);
+$('selectNoneBtn').onclick = () => setAllModels(false);
 $('runBtn').onclick = runBench;
 $('pauseBtn').onclick = async () => { await authedFetch('/gateway/benchmark/pause', { method: 'POST' }); refreshJob(); };
 $('resumeBtn').onclick = async () => { await authedFetch('/gateway/benchmark/resume', { method: 'POST' }); refreshJob(); };
