@@ -354,6 +354,7 @@ def create_app(
                 max_tokens=int(payload.get("max_tokens", 256)),
                 sample=payload.get("sample"),
                 concurrency=int(payload.get("concurrency", 1)),
+                api_key=config.server.api_keys[0] if config.server.api_keys else "",
             )
             return job.status()
 
@@ -389,10 +390,12 @@ def _render_benchmark_page(config: Config) -> str:
     from .frontend import page
     from .benchmark.dataset import list_datasets
     from .benchmark.job import current_job
+    from .benchmark.runner import load_speeds
 
     models = sorted(config.models.keys())
     datasets = list_datasets()
     job = current_job().status()
+    speeds = load_speeds()  # single-request throughput per model (tok/s)
 
     # Aggregate scored JSONL by (dataset, model_name) — one table per dataset,
     # so mmlu (500) / mmlu_pro (500) / smoke (6) are never merged into a
@@ -431,7 +434,10 @@ def _render_benchmark_page(config: Config) -> str:
         def _row(name: str, s: dict) -> str:
             acc = round(s["c"] / s["t"] * 100, 1) if s["t"] else 0
             lat = round(sum(s["lat"]) / len(s["lat"]), 1) if s["lat"] else "-"
-            tps = round(sum(s["tps"]) / len(s["tps"]), 2) if s["tps"] else "-"
+            # Throughput: single-request probe (benchmark_results/speeds.json),
+            # NOT the batched per-item tps average, which is misleading.
+            sp = speeds.get(name, {}).get("tps")
+            tps_cell = f"{sp:.1f}" if sp else "-"
             tags = "".join(
                 _tag(cn, round(c[1] / c[0] * 100, 1))
                 for cn in ("fact", "reasoning", "math", "chinese", "instruction", "coding")
@@ -439,7 +445,7 @@ def _render_benchmark_page(config: Config) -> str:
             )
             return (f'<tr><td>{name}</td><td class="num" style="font-weight:650">{acc}%</td>'
                     f'<td class="num">{s["c"]}/{s["t"]}</td><td>{tags}</td>'
-                    f'<td class="num">{lat}</td><td class="num">{tps}</td></tr>')
+                    f'<td class="num">{lat}</td><td class="num">{tps_cell}</td></tr>')
 
         def _table(ds: str, ms: dict) -> str:
             per_model = max((s["t"] for s in ms.values()), default=0)

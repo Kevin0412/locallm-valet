@@ -31,6 +31,7 @@ class BenchmarkJob:
     dataset: str = ""
     models: list[str] = field(default_factory=list)
     base_url: str = "http://127.0.0.1:8000/v1"
+    api_key: str = ""
     max_tokens: int = 256
     sample: Optional[int] = None
     concurrency: int = 1
@@ -45,6 +46,7 @@ class BenchmarkJob:
     _control: JobControl = field(default_factory=JobControl)
     _thread: Optional[threading.Thread] = None
     _results: list[BenchmarkResult] = field(default_factory=list)
+    speeds: dict = field(default_factory=dict)   # {model: single-request tok/s}
 
     def status(self) -> dict:
         return {
@@ -60,6 +62,7 @@ class BenchmarkJob:
             "error": self.error,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "speeds": self.speeds,
         }
 
     def running(self) -> bool:
@@ -82,6 +85,7 @@ def start_job(
     max_tokens: int,
     sample: Optional[int] = None,
     concurrency: int = 1,
+    api_key: str = "",
     output_dir: str = "benchmark_results",
 ) -> BenchmarkJob:
     """Start a benchmark job in a background thread (no-op if already running)."""
@@ -93,6 +97,7 @@ def start_job(
             dataset=dataset,
             models=list(models),
             base_url=base_url,
+            api_key=api_key,
             max_tokens=max_tokens,
             sample=sample,
             concurrency=concurrency,
@@ -163,6 +168,21 @@ def _worker(job: BenchmarkJob, output_dir: str) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.exception("benchmark save failed for %s", model_name)
             job.error = job.error or f"save {model_name}: {exc}"
+        # Single-request throughput probe: the per-item tps above was measured
+        # under batched decode; probe strictly serially for a clean figure.
+        if not job._control.cancel:
+            try:
+                from .runner import probe_single_request_tps, save_speed
+
+                speed = probe_single_request_tps(
+                    model_name=model_name, base_url=job.base_url,
+                    api_key=job.api_key,
+                )
+                save_speed(model_name, speed)
+                job.speeds[model_name] = speed
+                logger.info("single-request throughput %s = %s tok/s", model_name, speed)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("speed probe failed for %s: %s", model_name, exc)
         if job._control.cancel:
             job.state = "stopped"
             break

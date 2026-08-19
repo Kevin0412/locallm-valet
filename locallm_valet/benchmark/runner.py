@@ -8,6 +8,7 @@ slow local models never silently drop questions from a run.
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
 import time
 from typing import Optional
@@ -268,3 +269,103 @@ def run_benchmark(
                 logger.info("Progress: %d/%d", done, total)
 
     return [r for r in results if r is not None]
+
+
+def probe_single_request_tps(
+    *,
+    model_name: str,
+    base_url: str = "http://127.0.0.1:8000/v1",
+    api_key: str = "",
+    max_tokens: int = 256,
+    samples: int = 3,
+    timeout_s: int = 180,
+) -> float | None:
+    """Measure single-request generation throughput (tok/s).
+
+    The per-item ``tps`` recorded during a benchmark run is measured while
+    other requests share the backend (batched decode), so it understates a
+    model's real single-request throughput. This probe sends a few requests
+    strictly one after another (no concurrency) and returns the median
+    ``completion_tokens / elapsed`` — a clean single-request figure.
+    """
+    import statistics
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    chat_url = f"{base_url.rstrip('/')}/chat/completions"
+    # ~180-token prompt: short prefill, so elapsed is dominated by decode.
+    unit = "The quick brown fox jumps over the lazy dog while the rain falls on the quiet village streets. "
+    prompt = (unit * 18)[:1000]
+
+    rates: list[float] = []
+    for i in range(samples):
+        t0 = time.monotonic()
+        try:
+            with httpx.Client(timeout=httpx.Timeout(timeout_s)) as client:
+                resp = _post_with_retry(
+                    client=client,
+                    chat_url=chat_url,
+                    headers=headers,
+                    payload={
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                        "temperature": 0.0,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    },
+                    retries=1,
+                )
+                elapsed = time.monotonic() - t0
+                if resp.status_code != 200:
+                    logger.warning("[speed-probe] HTTP %d: %s",
+                                   resp.status_code, resp.text[:120])
+                    continue
+                usage = resp.json().get("usage", {})
+                n = usage.get("completion_tokens", 0)
+            if n >= 8 and elapsed > 0:
+                rates.append(n / elapsed)
+                logger.info("[speed-probe] %s sample %d/%d: %d tok in %.2fs = %.1f tok/s",
+                            model_name, i + 1, samples, n, elapsed, n / elapsed)
+        except httpx.HTTPError as exc:
+            logger.warning("[speed-probe] %s sample %d failed: %s", model_name, i + 1, exc)
+
+    if not rates:
+        return None
+    return round(statistics.median(rates), 2)
+
+
+_SPEEDS_FILE = "benchmark_results/speeds.json"
+
+
+def save_speed(model_name: str, tps: float | None) -> None:
+    """Persist a model's single-request throughput (benchmark_results/speeds.json)."""
+    from pathlib import Path
+
+    p = Path(_SPEEDS_FILE)
+    data: dict = {}
+    if p.is_file():
+        try:
+            data = json.loads(p.read_text("utf-8"))
+        except Exception:  # noqa: BLE001
+            data = {}
+    if tps is not None:
+        data[model_name] = {
+            "tps": tps,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def load_speeds() -> dict:
+    """Read persisted single-request throughputs: {model: {tps, ts}}."""
+    from pathlib import Path
+
+    p = Path(_SPEEDS_FILE)
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text("utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}

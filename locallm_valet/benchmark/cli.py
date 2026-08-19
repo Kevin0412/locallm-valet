@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from .dataset import get_dataset, list_datasets
-from .runner import run_benchmark
+from .runner import probe_single_request_tps, run_benchmark, save_speed
 from .report import render_report
 
 logger = logging.getLogger("locallm_valet.benchmark")
@@ -237,6 +237,10 @@ def main(args: argparse.Namespace) -> int:
             concurrency=concurrency,
             retries=args.retries,
         )
+        speed = probe_single_request_tps(model_name=args.model, base_url=args.base_url, api_key=api_key)
+        save_speed(args.model, speed)
+        if speed:
+            logger.info("single-request throughput %s = %.1f tok/s", args.model, speed)
         out_path = render_report(
             results=results,
             dataset_name=args.dataset,
@@ -283,6 +287,10 @@ def main(args: argparse.Namespace) -> int:
                 retries=args.retries,
             )
             all_results.extend(results)
+            speed = probe_single_request_tps(model_name=model_name, base_url=args.base_url, api_key=api_key)
+            save_speed(model_name, speed)
+            if speed:
+                logger.info("single-request throughput %s = %.1f tok/s", model_name, speed)
         out_path = render_report(
             results=all_results,
             dataset_name=args.dataset,
@@ -314,6 +322,10 @@ def main(args: argparse.Namespace) -> int:
                 retries=args.retries,
             )
             all_results.extend(results)
+            speed = probe_single_request_tps(model_name=model_name, base_url=args.base_url, api_key=api_key)
+            save_speed(model_name, speed)
+            if speed:
+                logger.info("single-request throughput %s = %.1f tok/s", model_name, speed)
         out_path = render_report(
             results=all_results,
             dataset_name=args.dataset,
