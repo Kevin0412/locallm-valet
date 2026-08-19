@@ -271,7 +271,102 @@ def run_benchmark(
     return [r for r in results if r is not None]
 
 
-def probe_single_request_tps(
+def _probe_once(
+    *,
+    chat_url: str,
+    headers: dict,
+    model_name: str,
+    max_tokens: int,
+    timeout_s: int,
+) -> tuple[float, float] | None:
+    """One streaming probe request; returns (prefill_tps, decode_tps).
+
+    llama.cpp responses carry a ``timings`` field with exact prompt/predicted
+    ms — used directly. Other backends (SGLang/vLLM) are split via SSE
+    timing: time-to-first-content-chunk ≈ prefill (+ first-token decode),
+    the remaining time is decode.
+    """
+    unit = "The quick brown fox jumps over the lazy dog while the rain falls on the quiet village streets. "
+    prompt = (unit * 18)[:1000]  # ~180-token prompt
+
+    t0 = time.monotonic()
+    first_ts: float | None = None
+    last_delta_ts: float | None = None
+    usage: dict = {}
+    timings: dict = {}
+    try:
+        with httpx.Client(timeout=httpx.Timeout(timeout_s)) as client:
+            with client.stream(
+                "POST",
+                chat_url,
+                headers=headers,
+                json={
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": 0.0,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+            ) as resp:
+                if resp.status_code != 200:
+                    logger.warning("[speed-probe] HTTP %d: %s",
+                                   resp.status_code, resp.text[:120])
+                    return None
+                for line in resp.iter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data = line[6:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        d = json.loads(data)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if d.get("usage"):
+                        usage = d["usage"]
+                    ch = (d.get("choices") or [{}])[0]
+                    if ch.get("timings"):
+                        timings = ch["timings"]
+                    delta = ch.get("delta") or {}
+                    if delta.get("content"):
+                        if first_ts is None:
+                            first_ts = time.monotonic()
+                        last_delta_ts = time.monotonic()
+    except httpx.HTTPError as exc:
+        logger.warning("[speed-probe] %s failed: %s", model_name, exc)
+        return None
+
+    total = time.monotonic() - t0
+    if first_ts is None or total <= 0:
+        return None
+
+    # llama.cpp timings are the exact per-phase figures
+    if timings.get("predicted_ms"):
+        try:
+            ptok = int(timings.get("prompt_n") or usage.get("prompt_tokens") or 0)
+            dtok = int(timings.get("predicted_n") or usage.get("completion_tokens") or 0)
+            p_ms = float(timings.get("prompt_ms") or 0)
+            d_ms = float(timings.get("predicted_ms") or 0)
+            prefill = ptok / (p_ms / 1000.0) if p_ms > 0 and ptok > 0 else None
+            decode = dtok / (d_ms / 1000.0) if d_ms > 0 and dtok > 0 else None
+            if prefill is not None and decode is not None:
+                return (round(prefill, 1), round(decode, 1))
+        except (TypeError, ValueError):
+            pass
+
+    # Generic SSE decomposition
+    ptok = usage.get("prompt_tokens") or 0
+    dtok = usage.get("completion_tokens") or 0
+    ttft = first_ts - t0
+    dec_time = (last_delta_ts or total) - first_ts
+    if ttft > 0 and ptok > 0 and dec_time > 0 and dtok > 0:
+        return (round(ptok / ttft, 1), round(dtok / dec_time, 1))
+    return None
+
+
+def probe_single_request_stats(
     *,
     model_name: str,
     base_url: str = "http://127.0.0.1:8000/v1",
@@ -279,14 +374,14 @@ def probe_single_request_tps(
     max_tokens: int = 256,
     samples: int = 3,
     timeout_s: int = 180,
-) -> float | None:
-    """Measure single-request generation throughput (tok/s).
+) -> dict | None:
+    """Measure single-request prefill & decode throughput (tok/s each).
 
     The per-item ``tps`` recorded during a benchmark run is measured while
     other requests share the backend (batched decode), so it understates a
-    model's real single-request throughput. This probe sends a few requests
-    strictly one after another (no concurrency) and returns the median
-    ``completion_tokens / elapsed`` — a clean single-request figure.
+    model's real single-request throughput. This probe streams a few
+    requests strictly one after another (no concurrency) and returns the
+    median prefill and decode rates — clean single-request figures.
     """
     import statistics
 
@@ -294,41 +389,28 @@ def probe_single_request_tps(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     chat_url = f"{base_url.rstrip('/')}/chat/completions"
-    # ~180-token prompt: short prefill, so elapsed is dominated by decode.
-    unit = "The quick brown fox jumps over the lazy dog while the rain falls on the quiet village streets. "
-    prompt = (unit * 18)[:1000]
 
-    rates: list[float] = []
+    prefill: list[float] = []
+    decode: list[float] = []
     for i in range(samples):
-        t0 = time.monotonic()
-        try:
-            with httpx.Client(timeout=httpx.Timeout(timeout_s)) as client:
-                resp = _post_with_retry(
-                    client=client,
-                    chat_url=chat_url,
-                    headers=headers,
-                    payload={
-                        "model": model_name,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": max_tokens,
-                        "temperature": 0.0,
-                        "chat_template_kwargs": {"enable_thinking": False},
-                    },
-                    retries=1,
-                )
-                elapsed = time.monotonic() - t0
-                if resp.status_code != 200:
-                    logger.warning("[speed-probe] HTTP %d: %s",
-                                   resp.status_code, resp.text[:120])
-                    continue
-                usage = resp.json().get("usage", {})
-                n = usage.get("completion_tokens", 0)
-            if n >= 8 and elapsed > 0:
-                rates.append(n / elapsed)
-                logger.info("[speed-probe] %s sample %d/%d: %d tok in %.2fs = %.1f tok/s",
-                            model_name, i + 1, samples, n, elapsed, n / elapsed)
-        except httpx.HTTPError as exc:
-            logger.warning("[speed-probe] %s sample %d failed: %s", model_name, i + 1, exc)
+        once = _probe_once(
+            chat_url=chat_url, headers=headers, model_name=model_name,
+            max_tokens=max_tokens, timeout_s=timeout_s,
+        )
+        if once is None:
+            continue
+        p, d = once
+        prefill.append(p)
+        decode.append(d)
+        logger.info("[speed-probe] %s sample %d/%d: prefill=%.0f tok/s decode=%.0f tok/s",
+                    model_name, i + 1, samples, p, d)
+
+    if not prefill or not decode:
+        return None
+    return {
+        "prefill_tps": round(statistics.median(prefill), 1),
+        "decode_tps": round(statistics.median(decode), 1),
+    }
 
     if not rates:
         return None
@@ -338,8 +420,12 @@ def probe_single_request_tps(
 _SPEEDS_FILE = "benchmark_results/speeds.json"
 
 
-def save_speed(model_name: str, tps: float | None) -> None:
-    """Persist a model's single-request throughput (benchmark_results/speeds.json)."""
+def save_speed(model_name: str, stats: dict | None) -> None:
+    """Persist a model's single-request throughput (benchmark_results/speeds.json).
+
+    ``stats`` carries ``prefill_tps`` and ``decode_tps``; a plain legacy
+    ``tps`` value is kept for backward compatibility.
+    """
     from pathlib import Path
 
     p = Path(_SPEEDS_FILE)
@@ -349,17 +435,20 @@ def save_speed(model_name: str, tps: float | None) -> None:
             data = json.loads(p.read_text("utf-8"))
         except Exception:  # noqa: BLE001
             data = {}
-    if tps is not None:
-        data[model_name] = {
-            "tps": tps,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        }
+    if stats:
+        entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+        if "prefill_tps" in stats or "decode_tps" in stats:
+            entry.update({"prefill_tps": stats.get("prefill_tps"),
+                          "decode_tps": stats.get("decode_tps")})
+        if stats.get("tps"):
+            entry["tps"] = stats["tps"]
+        data[model_name] = entry
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
 def load_speeds() -> dict:
-    """Read persisted single-request throughputs: {model: {tps, ts}}."""
+    """Read persisted single-request throughputs: {model: {prefill_tps, decode_tps, ts}}."""
     from pathlib import Path
 
     p = Path(_SPEEDS_FILE)

@@ -172,15 +172,17 @@ def _worker(job: BenchmarkJob, output_dir: str) -> None:
         # under batched decode; probe strictly serially for a clean figure.
         if not job._control.cancel:
             try:
-                from .runner import probe_single_request_tps, save_speed
+                from .runner import probe_single_request_stats, save_speed
 
-                speed = probe_single_request_tps(
+                stats = probe_single_request_stats(
                     model_name=model_name, base_url=job.base_url,
                     api_key=job.api_key,
                 )
-                save_speed(model_name, speed)
-                job.speeds[model_name] = speed
-                logger.info("single-request throughput %s = %s tok/s", model_name, speed)
+                save_speed(model_name, stats)
+                job.speeds[model_name] = stats
+                if stats:
+                    logger.info("single-request throughput %s: prefill=%.0f decode=%.0f tok/s",
+                                model_name, stats["prefill_tps"], stats["decode_tps"])
             except Exception as exc:  # noqa: BLE001
                 logger.warning("speed probe failed for %s: %s", model_name, exc)
         if job._control.cancel:
