@@ -138,6 +138,7 @@ const T = {
     results_title: '评测结果', accuracy: '准确率', correct_total: '正确/总数',
     category: '分项', avg_lat: '平均耗时 ms', avg_tps: '吞吐 tok/s',
     running: '运行中', paused: '已暂停', select_all: '全选', select_none: '清空',
+    slots_title: '设备槽位', pools_title: '资源池',
   },
   en: {
     dashboard: 'Dashboard', benchmark: 'Benchmark', theme_dark: 'Dark', theme_light: 'Light',
@@ -153,6 +154,7 @@ const T = {
     results_title: 'Results', accuracy: 'Accuracy', correct_total: 'Correct/Total',
     category: 'Breakdown', avg_lat: 'Avg Latency ms', avg_tps: 'Throughput tok/s',
     running: 'Running', paused: 'Paused', select_all: 'Select All', select_none: 'Clear',
+    slots_title: 'Device Slots', pools_title: 'Resource Pools',
   },
 };
 const i18n = key => (T[lang()] && T[lang()][key]) || key;

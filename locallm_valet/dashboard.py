@@ -36,6 +36,8 @@ DASHBOARD_HTML = page(
 
   <div class="cards" id="cards"></div>
 
+  <div id="slotsPanel"></div>
+
   <div class="panel">
     <h2 data-i18n="trend_title">输出趋势</h2>
     <div class="trend" id="trend"></div>
@@ -85,10 +87,52 @@ async function loadModels() {
       sel.appendChild(opt);
     }
     const s = await (await authedFetch('/gateway/status')).json();
+    // Multi-slot: aggregate running slots; pools shown in the slots panel.
+    const slots = s.slots || {};
+    const running = Object.entries(slots).filter(([, v]) => v.state === 'running');
     const chip = $('stateChip');
-    chip.textContent = s.state + (s.model ? ' · ' + s.model : '');
-    chip.className = 'tag ' + (s.state === 'running' ? 'ok' : '');
+    if (running.length) {
+      chip.textContent = running.map(([n, v]) => n + ':' + v.model).join('  ');
+      chip.className = 'tag ok';
+    } else {
+      chip.textContent = 'stopped';
+      chip.className = 'tag';
+    }
+    renderSlots(s);
   } catch (e) {}
+}
+
+function renderSlots(s) {
+  const slots = s.slots || {};
+  const pools = s.pools || {};
+  const wrap = $('slotsPanel');
+  if (!wrap) return;
+  let rows = '';
+  for (const [name, v] of Object.entries(slots)) {
+    const state = v.state === 'running' ? 'ok' : '';
+    rows += `<tr><td>${name}</td>
+      <td><span class="tag ${state}">${v.state}</span></td>
+      <td>${v.model || '—'}</td>
+      <td class="num">${fmt(v.active_requests)}</td>
+      <td class="num">${v.max_context_tokens ? fmt(v.max_context_tokens) : '—'}</td></tr>`;
+  }
+  let poolRows = '';
+  for (const [name, p] of Object.entries(pools)) {
+    const pct = p.total_gib > 0 ? (100 * (1 - p.available_gib / p.total_gib)).toFixed(0) : 0;
+    poolRows += `<tr><td>${name}${p.probeable ? '' : ' (未探测)'}</td>
+      <td class="num">${p.available_gib} / ${p.total_gib} GiB</td>
+      <td><div class="bar-wrap"><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div>
+      <span class="muted">${pct}%</span></div></td></tr>`;
+  }
+  wrap.innerHTML = rows
+    ? `<div class="panel"><h2 data-i18n="slots_title">设备槽位</h2><table>
+         <thead><tr><th>Slot</th><th data-i18n="status">状态</th><th data-i18n="model">模型</th>
+         <th class="num" data-i18n="requests">请求数</th><th class="num">Ctx</th></tr></thead>
+         <tbody>${rows}</tbody></table></div>
+       <div class="panel"><h2 data-i18n="pools_title">资源池</h2><table>
+         <thead><tr><th>Pool</th><th class="num">可用/总量</th><th>占用</th></tr></thead>
+         <tbody>${poolRows}</tbody></table></div>`
+    : '<div class="panel"><h2 data-i18n="slots_title">设备槽位</h2><p class="empty">—</p></div>';
 }
 
 function pct(a, b) { return b > 0 ? (100 * a / b).toFixed(1) + '%' : '0%'; }
