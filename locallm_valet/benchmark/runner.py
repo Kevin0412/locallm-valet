@@ -372,16 +372,19 @@ def probe_single_request_stats(
     base_url: str = "http://127.0.0.1:8000/v1",
     api_key: str = "",
     max_tokens: int = 256,
-    samples: int = 3,
+    samples: int = 8,
+    warmup: int = 2,
     timeout_s: int = 180,
 ) -> dict | None:
     """Measure single-request prefill & decode throughput (tok/s each).
 
     The per-item ``tps`` recorded during a benchmark run is measured while
     other requests share the backend (batched decode), so it understates a
-    model's real single-request throughput. This probe streams a few
-    requests strictly one after another (no concurrency) and returns the
-    median prefill and decode rates — clean single-request figures.
+    model's real single-request throughput. This probe streams ``samples``
+    requests strictly one after another (no concurrency), discards the first
+    ``warmup`` of them (CUDA-graph capture / cache warmup skew the first
+    requests), and returns the arithmetic mean of the steady samples —
+    clean single-request figures.
     """
     import statistics
 
@@ -405,16 +408,16 @@ def probe_single_request_stats(
         logger.info("[speed-probe] %s sample %d/%d: prefill=%.0f tok/s decode=%.0f tok/s",
                     model_name, i + 1, samples, p, d)
 
-    if not prefill or not decode:
+    steady_p = prefill[warmup:]
+    steady_d = decode[warmup:]
+    if not steady_p or not steady_d:
         return None
     return {
-        "prefill_tps": round(statistics.median(prefill), 1),
-        "decode_tps": round(statistics.median(decode), 1),
+        "prefill_tps": round(statistics.fmean(steady_p), 1),
+        "decode_tps": round(statistics.fmean(steady_d), 1),
+        "samples": len(prefill),
+        "steady": len(steady_p),
     }
-
-    if not rates:
-        return None
-    return round(statistics.median(rates), 2)
 
 
 _SPEEDS_FILE = "benchmark_results/speeds.json"
@@ -440,6 +443,9 @@ def save_speed(model_name: str, stats: dict | None) -> None:
         if "prefill_tps" in stats or "decode_tps" in stats:
             entry.update({"prefill_tps": stats.get("prefill_tps"),
                           "decode_tps": stats.get("decode_tps")})
+        if stats.get("samples"):
+            entry["samples"] = stats["samples"]
+            entry["steady"] = stats.get("steady")
         if stats.get("tps"):
             entry["tps"] = stats["tps"]
         data[model_name] = entry
