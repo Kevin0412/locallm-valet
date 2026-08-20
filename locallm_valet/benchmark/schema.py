@@ -29,6 +29,10 @@ class BenchmarkItem:
     """Multiple-choice options if applicable, e.g. ["A. Paris", "B. London", …]."""
     language: str = "en"
     """Question language: en / zh."""
+    meta: dict = field(default_factory=dict)
+    """Extra per-item data for specialised scorers, e.g.
+    {"entry_point": "has_close_elements", "test": "def check(candidate): ..."}
+    for code-execution benchmarks (HumanEval / MBPP)."""
 
     def to_dict(self) -> dict:
         return asdict(self)

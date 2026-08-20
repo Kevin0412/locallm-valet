@@ -294,6 +294,101 @@ def _get_ocrbench(sample: int | None = None) -> list[BenchmarkItem]:
 
 
 # ---------------------------------------------------------------------------
+# Code benchmarks (HumanEval / MBPP) — downloaded from GitHub, cached locally.
+# ---------------------------------------------------------------------------
+
+def _github_get(url: str) -> bytes:
+    """Fetch a raw GitHub file, honouring HTTPS_PROXY if set; caches under
+    dataset_cache/code so the network is only hit once."""
+    import hashlib
+
+    code_cache = _cache_dir() / "code"
+    code_cache.mkdir(parents=True, exist_ok=True)
+    cache_f = code_cache / hashlib.sha1(url.encode()).hexdigest()
+    if cache_f.is_file():
+        return cache_f.read_bytes()
+
+    import httpx
+
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("http_proxy")
+    try:
+        r = httpx.get(url, timeout=90, proxy=proxy)
+        r.raise_for_status()
+    except Exception:
+        # no proxy configured → try direct; Windows boxes often need the proxy
+        r = httpx.get(url, timeout=90)
+        r.raise_for_status()
+    cache_f.write_bytes(r.content)
+    return r.content
+
+
+def _load_humaneval(sample: int | None = None) -> list[BenchmarkItem]:
+    """HumanEval (openai, 164 tasks): generate the function body; scored by
+    executing the hidden test with the generated candidate (pass@1)."""
+    import gzip
+
+    raw = _github_get(
+        "https://raw.githubusercontent.com/openai/human-eval/master/data/HumanEval.jsonl.gz"
+    )
+    rows = [json.loads(l) for l in gzip.decompress(raw).decode("utf-8").splitlines()]
+
+    if sample is not None and 0 < sample < len(rows):
+        random.seed(42)
+        rows = random.sample(rows, sample)
+
+    items = []
+    for row in rows:
+        prompt = row["prompt"].rstrip()
+        items.append(BenchmarkItem(
+            item_id=row["task_id"],
+            category="coding",
+            question=(
+                f"Complete the following Python function. Return ONLY the code, "
+                f"no explanation, no markdown fences.\n\n{prompt}"
+            ),
+            ground_truth=row.get("canonical_solution", ""),
+            meta={
+                "prompt": row["prompt"],
+                "entry_point": row["entry_point"],
+                "test": row["test"],
+            },
+        ))
+    logger.info("Loaded %d HumanEval items", len(items))
+    return items
+
+
+def _load_mbpp(sample: int | None = None) -> list[BenchmarkItem]:
+    """MBPP (google, 974 tasks): implement a described function; scored by
+    executing the provided assert list against the generated solution."""
+    raw = _github_get(
+        "https://raw.githubusercontent.com/google-research/google-research/master/mbpp/mbpp.jsonl"
+    )
+    rows = [json.loads(l) for l in raw.decode("utf-8").splitlines()]
+
+    if sample is not None and 0 < sample < len(rows):
+        random.seed(42)
+        rows = random.sample(rows, sample)
+
+    items = []
+    for row in rows:
+        items.append(BenchmarkItem(
+            item_id=f"MBPP_{row['task_id']}",
+            category="coding",
+            question=(
+                f"Write a Python function that satisfies: {row['text']}\n"
+                f"Return ONLY the code, no explanation, no markdown fences."
+            ),
+            ground_truth=row.get("code", ""),
+            meta={
+                "test_setup": row.get("test_setup_code", ""),
+                "test_list": row.get("test_list", []),
+            },
+        ))
+    logger.info("Loaded %d MBPP items", len(items))
+    return items
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -304,6 +399,8 @@ _DATASETS: dict[str, callable] = {
     "bfcl": _get_bfcl,
     "mmstar": _get_mmstar,
     "ocrbench": _get_ocrbench,
+    "humaneval": _load_humaneval,
+    "mbpp": _load_mbpp,
 }
 
 
