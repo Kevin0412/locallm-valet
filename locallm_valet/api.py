@@ -174,10 +174,9 @@ def create_app(
             except Exception:  # noqa: BLE001 - recording never breaks proxying
                 logger.exception("usage recording failed for %s", model_name)
 
-        await manager.ensure_loaded(model_name)
+        await manager.admit_request(model_name)
         slot_mgr = manager.get_slot_manager(model_name)
         base_url = manager.base_url_for(model_name)
-        slot_mgr.request_started()
         if is_stream:
             # proxy.stream owns the finish callback: it fires on send failure
             # or when the SSE stream is fully consumed / closed by the client.
@@ -352,10 +351,15 @@ def create_app(
             models = payload.get("models")
             if not isinstance(models, list) or not models:
                 raise InvalidRequest("'models' must be a non-empty list of model names")
+            # Forward the caller's API key (Bearer token) so the job's requests
+            # stay authenticated when the valet has auth enabled.
+            auth = request.headers.get("authorization", "")
+            api_key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
             job = start_job(
                 dataset=dataset,
                 models=[str(m) for m in models],
                 base_url=f"http://127.0.0.1:{config.server.port}/v1",
+                api_key=api_key,
                 max_tokens=int(payload.get("max_tokens", 256)),
                 sample=payload.get("sample"),
                 concurrency=int(payload.get("concurrency", 1)),
@@ -401,40 +405,58 @@ def _render_benchmark_page(config: Config) -> str:
     datasets = list_datasets()
     job = current_job().status()
 
-    # Aggregate scored JSONL by model_name (+ thinking mode)
+    # Aggregate scored JSONL by (model_name, dataset) — the new file format is
+    # {model}_{dataset}_results.jsonl, so the dataset is explicit per file.
     rows = ""
     results_dir = Path("benchmark_results")
     if results_dir.is_dir():
         ms: dict = defaultdict(lambda: {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]),
-                                        "lat": [], "tps": [], "tok": [], "thinking": None})
+                                        "lat": [], "tps": [], "tok": [], "thinking": None,
+                                        "dataset": ""})
         for f in sorted(results_dir.glob("*_results.jsonl")):
+            # Filename: {model}_{dataset}_results.jsonl (new) or
+            # {model}_results.jsonl (legacy). The dataset is whatever remains
+            # after stripping the record's own model_name — model names
+            # contain underscores (Qwen3-1.7B-Q4_K_M), so strip-by-prefix is
+            # more reliable than a blind rsplit.
+            stem = f.stem[:-len("_results")]  # drop trailing _results
             for line in f.read_text("utf-8").strip().splitlines():
                 if not line:
                     continue
                 r = json.loads(line)
                 m = r.get("model_name", "?")
-                ms[m]["t"] += 1
+                ds = ""
+                if m and stem.startswith(m):
+                    rest = stem[len(m):]
+                    ds = rest.lstrip("_") if rest else ""
+                elif "_" in stem:
+                    ds = stem.rsplit("_", 1)[-1]
+                key = (m, ds)
+                s = ms[key]
+                s["dataset"] = ds
+                s["t"] += 1
                 if r.get("is_correct") is True:
-                    ms[m]["c"] += 1
+                    s["c"] += 1
                 cat = r.get("category", "?")
-                ms[m]["cat"][cat][0] += 1
+                s["cat"][cat][0] += 1
                 if r.get("is_correct") is True:
-                    ms[m]["cat"][cat][1] += 1
+                    s["cat"][cat][1] += 1
                 if r.get("latency_ms"):
-                    ms[m]["lat"].append(r["latency_ms"])
+                    s["lat"].append(r["latency_ms"])
                 if r.get("tps"):
-                    ms[m]["tps"].append(r["tps"])
+                    s["tps"].append(r["tps"])
                 if r.get("completion_tokens"):
-                    ms[m]["tok"].append(r["completion_tokens"])
+                    s["tok"].append(r["completion_tokens"])
                 th = r.get("thinking")
                 if th is not None:
-                    ms[m]["thinking"] = bool(th)
+                    s["thinking"] = bool(th)
 
         def _tag(cn: str, pct: float) -> str:
             cls = "ok" if pct >= 60 else ("warn" if pct >= 30 else "err")
             return f'<span class="tag {cls}">{cn} {pct:.0f}%</span>'
 
-        def _row(name: str, s: dict) -> str:
+        def _row(key: tuple, s: dict) -> str:
+            name, ds = key
             acc = round(s["c"] / s["t"] * 100, 1) if s["t"] else 0
             lat = round(sum(s["lat"]) / len(s["lat"]), 1) if s["lat"] else "-"
             tps = round(sum(s["tps"]) / len(s["tps"]), 2) if s["tps"] else "-"
@@ -445,15 +467,15 @@ def _render_benchmark_page(config: Config) -> str:
                 for cn in ("fact", "reasoning", "math", "chinese", "instruction", "coding")
                 if (c := s["cat"].get(cn)) and c[0]
             )
-            return (f'<tr><td>{name}</td><td>{mode}</td>'
+            return (f'<tr><td>{name}</td><td>{ds or "-"}</td><td>{mode}</td>'
                     f'<td class="num" style="font-weight:650">{acc}%</td>'
                     f'<td class="num">{s["c"]}/{s["t"]}</td><td>{tags}</td>'
                     f'<td class="num">{avg_tok}</td>'
                     f'<td class="num">{lat}</td><td class="num">{tps}</td></tr>')
 
         rows = "".join(
-            _row(name, s)
-            for name, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
+            _row(key, s)
+            for key, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
         )
 
     # Group models by slot for a friendlier selector
@@ -510,6 +532,7 @@ def _render_benchmark_page(config: Config) -> str:
     <table>
       <thead><tr>
         <th data-i18n="model">模型</th>
+        <th data-i18n="dataset">数据集</th>
         <th data-i18n="mode">模式</th>
         <th class="num" data-i18n="accuracy">准确率</th>
         <th class="num" data-i18n="correct_total">正确/总数</th>
@@ -518,7 +541,7 @@ def _render_benchmark_page(config: Config) -> str:
         <th class="num" data-i18n="avg_lat">平均耗时 ms</th>
         <th class="num" data-i18n="avg_tps">吞吐 tok/s</th>
       </tr></thead>
-      <tbody id="resultsBody">{rows or '<tr><td colspan="8" class="empty" data-i18n="empty">暂无数据</td></tr>'}</tbody>
+      <tbody id="resultsBody">{rows or '<tr><td colspan="9" class="empty" data-i18n="empty">暂无数据</td></tr>'}</tbody>
     </table>
   </div>
 </main>

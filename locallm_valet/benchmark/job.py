@@ -35,6 +35,7 @@ class BenchmarkJob:
     dataset: str = ""
     models: list[str] = field(default_factory=list)
     base_url: str = "http://127.0.0.1:8000/v1"
+    api_key: str = ""
     max_tokens: int = 256
     sample: Optional[int] = None
     concurrency: int = 1
@@ -89,6 +90,7 @@ def start_job(
     sample: Optional[int] = None,
     concurrency: int = 1,
     enable_thinking: bool = False,
+    api_key: str = "",
     output_dir: str = "benchmark_results",
     slot_of: Optional[dict] = None,
 ) -> BenchmarkJob:
@@ -97,6 +99,9 @@ def start_job(
     ``enable_thinking``: False = non-thinking mode (default, fast);
     True = thinking mode (slower, higher quality) — recorded per result so
     both deployment modes can be compared.
+
+    ``api_key``: forwarded to the runner so requests stay authenticated when
+    the valet has auth enabled (Bearer header).
 
     ``slot_of``: optional mapping model_name → slot_name, used to group models
     for cross-slot parallel execution. When absent, all models run serially on
@@ -110,6 +115,7 @@ def start_job(
             dataset=dataset,
             models=list(models),
             base_url=base_url,
+            api_key=api_key,
             max_tokens=max_tokens,
             sample=sample,
             concurrency=concurrency,
@@ -188,6 +194,7 @@ def _slot_worker(job: BenchmarkJob, slot_name: str, models: list[str],
                 items=items,
                 model_name=model_name,
                 base_url=job.base_url,
+                api_key=job.api_key,
                 max_tokens=job.max_tokens,
                 concurrency=job.concurrency,
                 control=job._control,
@@ -209,7 +216,8 @@ def _slot_worker(job: BenchmarkJob, slot_name: str, models: list[str],
             job._results.extend(results)
             job.done_items += len(results)
         # Persist per-model immediately so partial results are visible while
-        # the rest of the run continues.
+        # the rest of the run continues. File name carries model + dataset so
+        # the results table can distinguish both.
         try:
             _save_model(job, results, output_dir)
         except Exception as exc:  # noqa: BLE001
@@ -229,7 +237,7 @@ def _save_results(job: BenchmarkJob, results: list[BenchmarkResult], output_dir:
         by_model.setdefault(r.model_name, []).append(r)
 
     for model_name, rlist in by_model.items():
-        _write_model_jsonl(out, model_name, rlist)
+        _write_model_jsonl(out, model_name, job.dataset, rlist)
     logger.info("saved %d result file(s) under %s", len(by_model), out)
 
 
@@ -237,13 +245,19 @@ def _save_model(job: BenchmarkJob, results: list[BenchmarkResult], output_dir: s
     """Persist one model's results as its own JSONL file immediately."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    _write_model_jsonl(out, results[0].model_name if results else "unknown", results)
+    _write_model_jsonl(out, results[0].model_name if results else "unknown",
+                       job.dataset, results)
     logger.info("saved %d results for %s under %s", len(results),
                 results[0].model_name if results else "?", out)
 
 
-def _write_model_jsonl(out: Path, model_name: str, results: list[BenchmarkResult]) -> None:
-    path = out / f"{model_name}_results.jsonl"
+def _write_model_jsonl(out: Path, model_name: str, dataset: str,
+                       results: list[BenchmarkResult]) -> None:
+    # {model}_{dataset}_results.jsonl — the dataset is explicit in the name,
+    # so the results page groups by model_name and shows the dataset, and a
+    # later same-model run on another dataset cannot overwrite it.
+    safe_dataset = "".join(c for c in dataset if c.isalnum() or c in "_-")
+    path = out / f"{model_name}_{safe_dataset}_results.jsonl"
     with open(path, "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")

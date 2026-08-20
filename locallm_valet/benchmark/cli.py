@@ -101,11 +101,39 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     # -- list-datasets --
     bench_sub.add_parser("list-datasets", help="Show available datasets")
 
+    # -- probe --
+    probe_p = bench_sub.add_parser("probe", help="Speed probe: TTFT / prefill / decode / cold start / concurrency")
+    probe_p.add_argument("--model", required=True, help="Model registry name.")
+    probe_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
+                         help="Valet OpenAI-compatible base URL.")
+    probe_p.add_argument("--no-cold-start", action="store_true",
+                         help="Skip the cold-start (first request incl. load) probe.")
+    probe_p.add_argument("--output-dir", default="benchmark_results",
+                         help="Directory for the probe JSONL.")
+
 
 def main(args: argparse.Namespace) -> int:
     """Entry point for the ``benchmark`` subcommand."""
 
     logger = logging.getLogger("locallm_valet.benchmark")
+
+    if args.bench_cmd == "probe":
+        from .probe import probe_speed, probe_to_jsonl
+        from pathlib import Path
+        print(f"Speed probe: {args.model} @ {args.base_url}")
+        result = probe_speed(
+            model_name=args.model,
+            base_url=args.base_url,
+            include_cold_start=not args.no_cold_start,
+        )
+        import json
+        print(json.dumps(result["metrics"], ensure_ascii=False, indent=2))
+        out = Path(args.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{args.model}_speed_probe.jsonl"
+        probe_to_jsonl(result, str(path))
+        print(f"\nProbe saved to: {path}")
+        return 0
 
     if args.bench_cmd == "list-datasets":
         print("Available datasets:")

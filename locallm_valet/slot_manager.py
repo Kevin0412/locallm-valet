@@ -71,6 +71,16 @@ class SlotManager:
         parallel; the same slot serializes like the single-slot valet."""
         return await self._manager_for(model_name).ensure_loaded(model_name)
 
+    async def admit_request(self, model_name: str) -> ModelSpec:
+        """Atomically gate + admit a request on the model's slot.
+
+        See ModelManager.admit_request — the confirm-and-count happens in one
+        critical section, closing the race where a request could be proxied
+        to a backend that switched/stopped between ensure_loaded and the
+        active-request bump.
+        """
+        return await self._manager_for(model_name).admit_request(model_name)
+
     def get_slot_manager(self, model_name: str) -> ModelManager:
         """Public: the ModelManager for the model's slot."""
         return self._manager_for(model_name)

@@ -173,6 +173,47 @@ class ModelManager:
         self.last_activity = self._now()
         self.active_requests += 1
 
+    async def admit_request(self, model_name: str) -> ModelSpec:
+        """Atomically gate AND admit a request for ``model_name``.
+
+        Closes the admission race that plagued the old two-step
+        (``await ensure_loaded(); request_started()``): between those two
+        statements the state machine could transition away (switch / stop)
+        because ``active_requests`` was still 0, and the request would then
+        be proxied to a backend that is stopping or already serving another
+        model.
+
+        Admission runs inside a very short critical section on
+        ``_transition_lock``:
+
+         1. confirm ``RUNNING`` with ``current_model == model_name``, and
+         2. bump ``active_requests``
+
+        …then the lock is released. The (long) lifecycle work to *get* to
+        RUNNING happens outside the lock via ``ensure_loaded``; only the
+        final confirm-and-count is atomic. While admitted, ``active_requests
+        > 0`` blocks switches/stops (no preemption), so the backend cannot
+        be yanked from under the request.
+
+        Returns the spec when admitted; raises a typed error otherwise.
+        """
+        while True:
+            # 1) fast path: already RUNNING with this model → admit atomically
+            async with self._transition_lock:
+                if self.state is State.RUNNING and self.current_model == model_name:
+                    self.request_started()
+                    spec = self.cfg.get_model(model_name)
+                    if spec is not None:
+                        return spec
+                # a stop/switch may be in flight; fall through and re-verify
+            # 2) not admitted yet — bring the model up (long, lock-free)
+            spec = self.cfg.get_model(model_name)
+            if spec is None:
+                raise ModelNotFound(f"model {model_name!r} is not in the registry")
+            await self.ensure_loaded(model_name)
+            # loop: re-check + admit under the lock (the race is only closed
+            # by confirming state AND counting in one critical section)
+
     def request_finished(self) -> None:
         """Call when the request truly ends.
 

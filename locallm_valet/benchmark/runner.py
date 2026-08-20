@@ -52,25 +52,31 @@ def _run_one(item: BenchmarkItem, model_name: str, chat_url: str, headers: dict,
     burns output tokens on reasoning_content). The mode is recorded on the
     result so accuracy/latency can be compared across modes.
     """
-    messages = [{"role": "user", "content": item.question}]
+    messages = []
+    if item.system:
+        messages.append({"role": "system", "content": item.system})
+    messages.append({"role": "user", "content": item.question})
     t0 = time.monotonic()
     result = BenchmarkResult(item=item, model_name=model_name)
     result.thinking = enable_thinking
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout_s)) as client:
-            resp = client.post(
-                chat_url,
-                headers=headers,
-                json={
-                    "model": model_name,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    # Qwen3-style models default to thinking mode; we make it
-                    # explicit so both deployment modes are measurable.
-                    "chat_template_kwargs": {"enable_thinking": enable_thinking},
-                },
-            )
+            req_body: dict = {
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                # Qwen3-style models default to thinking mode; we make it
+                # explicit so both deployment modes are measurable.
+                "chat_template_kwargs": {"enable_thinking": enable_thinking},
+            }
+            # BFCL-style function calling: pass the tool schemas so the model
+            # can actually emit tool_calls.
+            tools = item.meta.get("tools") if item.meta else None
+            if tools:
+                req_body["tools"] = tools
+                req_body["tool_choice"] = "auto"
+            resp = client.post(chat_url, headers=headers, json=req_body)
             elapsed = time.monotonic() - t0
 
         if resp.status_code != 200:
@@ -82,10 +88,17 @@ def _run_one(item: BenchmarkItem, model_name: str, chat_url: str, headers: dict,
         choices = data.get("choices", [])
         raw_text = ""
         reasoning_text = ""
+        tool_calls = None
         if choices:
             msg = choices[0].get("message", {}) or {}
             raw_text = msg.get("content", "")
             reasoning_text = msg.get("reasoning_content") or msg.get("reasoning") or ""
+            tool_calls = msg.get("tool_calls")
+        # Keep tool calls for BFCL scoring (stored in raw_response as JSON so
+        # the scorer can compare against expected_tool_calls).
+        if tool_calls:
+            result.raw_response = json.dumps(tool_calls, ensure_ascii=False)
+            result.tool_calls = tool_calls
         usage = data.get("usage", {})
         completion_tokens = usage.get("completion_tokens", 0)
         prompt_tokens = usage.get("prompt_tokens", 0)

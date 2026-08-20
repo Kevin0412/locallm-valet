@@ -27,6 +27,9 @@ class BenchmarkItem:
     """Expected answer string. For multiple choice this is the letter (A/B/C/D)."""
     choices: list[str] = field(default_factory=list)
     """Multiple-choice options if applicable, e.g. ["A. Paris", "B. London", …]."""
+    system: str = ""
+    """Optional system prompt (e.g. MMLU-Pro's CoT instruction). Sent as the
+    first chat message; empty = no system message."""
     language: str = "en"
     """Question language: en / zh."""
     meta: dict = field(default_factory=dict)
@@ -74,6 +77,8 @@ class BenchmarkResult:
     """Output token count from usage (includes reasoning tokens when thinking)."""
     reasoning_tokens: int = 0
     """Length of the reasoning_content snippet (proxy for reasoning usage)."""
+    tool_calls: Optional[list] = None
+    """Tool calls emitted by the model (BFCL): [{id, type, function:{name, arguments}}]."""
 
     def to_dict(self) -> dict:
         return {
@@ -95,6 +100,7 @@ class BenchmarkResult:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "reasoning_tokens": self.reasoning_tokens,
+            "tool_calls": self.tool_calls,
         }
 
 
