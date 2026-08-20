@@ -93,7 +93,7 @@ async function loadModels() {
 
 function pct(a, b) { return b > 0 ? (100 * a / b).toFixed(1) + '%' : '0%'; }
 
-function render(data) {
+function render(data, group) {
   const s = data.summary;
   const cards = [
     ['Requests', fmt(s.requests), ''],
