@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Benchmark runner — sends items to the valet's OpenAI-compatible API."""
+"""Benchmark runner — sends items to the valet's OpenAI-compatible API.
+
+Records per-request latency, TTFT (when the backend exposes timings), decode
+throughput and output tokens, plus the thinking mode used so accuracy can be
+compared across non-thinking / thinking deployment modes.
+"""
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Optional
@@ -37,43 +41,21 @@ class JobControl:
             _t.sleep(0.2)
 
 
-def run_benchmark(
-    *,
-    items: list[BenchmarkItem],
-    model_name: str,
-    base_url: str = "http://127.0.0.1:8000/v1",
-    api_key: str = "",
-    max_tokens: int = 256,
-    temperature: float = 0.0,
-    timeout_s: int = 180,
-    concurrency: int = 1,
-    save_responses: bool = True,
-    control: JobControl | None = None,
-) -> list[BenchmarkResult]:
-    """Run a list of benchmark items through the valet API.
-
-    Args:
-        items: Benchmark items to evaluate.
-        model_name: The model registry name as the valet knows it.
-        base_url: Valet's OpenAI-compatible endpoint.
-        api_key: API key if the valet requires one.
-        max_tokens: Max generation tokens.
-        temperature: 0.0 = greedy (recommended for benchmark reproducibility).
-        timeout_s: Per-request timeout.
-        concurrency: Number of concurrent requests (1 = serial, simplest).
-        save_responses: If True, record raw response text in the result.
-        control: Optional JobControl for pause/resume/stop from the web UI.
-
-    Returns:
-        List of BenchmarkResult, one per item.
-    """
 def _run_one(item: BenchmarkItem, model_name: str, chat_url: str, headers: dict,
              max_tokens: int, temperature: float, timeout_s: int,
-             save_responses: bool, total: int) -> BenchmarkResult:
-    """Run a single benchmark item (used directly or via thread pool)."""
+             save_responses: bool, total: int,
+             enable_thinking: bool = False) -> BenchmarkResult:
+    """Run a single benchmark item (used directly or via thread pool).
+
+    ``enable_thinking=False`` disables reasoning (Qwen3 non-thinking mode);
+    ``True`` lets the model think (thinking mode — slower, higher quality,
+    burns output tokens on reasoning_content). The mode is recorded on the
+    result so accuracy/latency can be compared across modes.
+    """
     messages = [{"role": "user", "content": item.question}]
     t0 = time.monotonic()
     result = BenchmarkResult(item=item, model_name=model_name)
+    result.thinking = enable_thinking
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout_s)) as client:
             resp = client.post(
@@ -84,11 +66,9 @@ def _run_one(item: BenchmarkItem, model_name: str, chat_url: str, headers: dict,
                     "messages": messages,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
-                    # Qwen3-style models default to thinking mode, which
-                    # burns the token budget on reasoning_content and
-                    # leaves content empty — disable for benchmarking so
-                    # the answer is actually produced.
-                    "chat_template_kwargs": {"enable_thinking": False},
+                    # Qwen3-style models default to thinking mode; we make it
+                    # explicit so both deployment modes are measurable.
+                    "chat_template_kwargs": {"enable_thinking": enable_thinking},
                 },
             )
             elapsed = time.monotonic() - t0
@@ -101,16 +81,35 @@ def _run_one(item: BenchmarkItem, model_name: str, chat_url: str, headers: dict,
         data = resp.json()
         choices = data.get("choices", [])
         raw_text = ""
+        reasoning_text = ""
         if choices:
-            raw_text = (choices[0].get("message", {}) or {}).get("content", "")
+            msg = choices[0].get("message", {}) or {}
+            raw_text = msg.get("content", "")
+            reasoning_text = msg.get("reasoning_content") or msg.get("reasoning") or ""
         usage = data.get("usage", {})
         completion_tokens = usage.get("completion_tokens", 0)
+        prompt_tokens = usage.get("prompt_tokens", 0)
 
         if save_responses:
             result.raw_response = raw_text
         result.latency_ms = round(elapsed * 1000, 1)
+        result.prompt_tokens = prompt_tokens
+        result.completion_tokens = completion_tokens
+        result.reasoning_tokens = len(reasoning_text)
         if completion_tokens > 0 and elapsed > 0:
             result.tps = round(completion_tokens / elapsed, 2)
+
+        # TTFT: backend-provided timings win (llama.cpp returns
+        # `timings.prompt_ms` ≈ prefill/TTFT, `timings.predicted_ms` ≈ decode).
+        timings = data.get("timings") or {}
+        prompt_ms = timings.get("prompt_ms")
+        predicted_ms = timings.get("predicted_ms")
+        if isinstance(prompt_ms, (int, float)) and prompt_ms > 0:
+            result.ttft_ms = round(float(prompt_ms), 1)
+        if isinstance(predicted_ms, (int, float)) and predicted_ms > 0:
+            result.decode_ms = round(float(predicted_ms), 1)
+            if completion_tokens > 0 and predicted_ms > 0:
+                result.tps = round(completion_tokens / (predicted_ms / 1000.0), 2)
 
     except httpx.TimeoutException:
         result.raw_response = "[TIMEOUT]"
@@ -134,6 +133,7 @@ def run_benchmark(
     concurrency: int = 1,
     save_responses: bool = True,
     control: JobControl | None = None,
+    enable_thinking: bool = False,
 ) -> list[BenchmarkResult]:
     """Run a list of benchmark items through the valet API.
 
@@ -150,6 +150,10 @@ def run_benchmark(
                      servers just queue. Defaults to 1 (serial).
         save_responses: If True, record raw response text in the result.
         control: Optional JobControl for pause/resume/stop from the web UI.
+        enable_thinking: False = non-thinking mode (fast, low latency);
+                         True = thinking mode (higher quality, slower).
+                         The mode is recorded per result so both can be
+                         compared side by side.
 
     Returns:
         List of BenchmarkResult, one per item (input order preserved).
@@ -172,7 +176,8 @@ def run_benchmark(
                         idx + 1, total, item.item_id, item.category)
             results.append(_run_one(item, model_name, chat_url, headers,
                                     max_tokens, temperature, timeout_s,
-                                    save_responses, total))
+                                    save_responses, total,
+                                    enable_thinking=enable_thinking))
         return results
 
     # Concurrent path: submit in chunks of `concurrency`, checking pause/cancel
@@ -190,7 +195,8 @@ def run_benchmark(
             chunk = items[pos:pos + concurrency]
             futures = {pool.submit(_run_one, item, model_name, chat_url, headers,
                                    max_tokens, temperature, timeout_s,
-                                   save_responses, total): (pos + i)
+                                   save_responses, total,
+                                   enable_thinking=enable_thinking): (pos + i)
                        for i, item in enumerate(chunk)}
             for fut in futures:
                 idx = futures[fut]

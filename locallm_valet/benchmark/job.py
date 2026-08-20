@@ -38,6 +38,7 @@ class BenchmarkJob:
     max_tokens: int = 256
     sample: Optional[int] = None
     concurrency: int = 1
+    enable_thinking: bool = False
     state: str = "idle"          # idle | running | paused | done | error | stopped
     current_model: str = ""
     current_item: int = 0
@@ -57,6 +58,7 @@ class BenchmarkJob:
             "models": self.models,
             "sample": self.sample,
             "concurrency": self.concurrency,
+            "enable_thinking": self.enable_thinking,
             "current_model": self.current_model,
             "current_item": self.current_item,
             "total_items": self.total_items,
@@ -86,10 +88,15 @@ def start_job(
     max_tokens: int,
     sample: Optional[int] = None,
     concurrency: int = 1,
+    enable_thinking: bool = False,
     output_dir: str = "benchmark_results",
     slot_of: Optional[dict] = None,
 ) -> BenchmarkJob:
     """Start a benchmark job in background threads (no-op if already running).
+
+    ``enable_thinking``: False = non-thinking mode (default, fast);
+    True = thinking mode (slower, higher quality) — recorded per result so
+    both deployment modes can be compared.
 
     ``slot_of``: optional mapping model_name → slot_name, used to group models
     for cross-slot parallel execution. When absent, all models run serially on
@@ -106,6 +113,7 @@ def start_job(
             max_tokens=max_tokens,
             sample=sample,
             concurrency=concurrency,
+            enable_thinking=enable_thinking,
             state="running",
             started_at=time.time(),
             _control=JobControl(),
@@ -183,6 +191,7 @@ def _slot_worker(job: BenchmarkJob, slot_name: str, models: list[str],
                 max_tokens=job.max_tokens,
                 concurrency=job.concurrency,
                 control=job._control,
+                enable_thinking=job.enable_thinking,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("benchmark model run failed: %s", model_name)

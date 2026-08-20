@@ -359,6 +359,7 @@ def create_app(
                 max_tokens=int(payload.get("max_tokens", 256)),
                 sample=payload.get("sample"),
                 concurrency=int(payload.get("concurrency", 1)),
+                enable_thinking=bool(payload.get("enable_thinking", False)),
                 slot_of={m: config.models[m].slot for m in models if m in config.models},
             )
             return job.status()
@@ -400,11 +401,12 @@ def _render_benchmark_page(config: Config) -> str:
     datasets = list_datasets()
     job = current_job().status()
 
-    # Aggregate scored JSONL by model_name
+    # Aggregate scored JSONL by model_name (+ thinking mode)
     rows = ""
     results_dir = Path("benchmark_results")
     if results_dir.is_dir():
-        ms: dict = defaultdict(lambda: {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]), "lat": [], "tps": []})
+        ms: dict = defaultdict(lambda: {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]),
+                                        "lat": [], "tps": [], "tok": [], "thinking": None})
         for f in sorted(results_dir.glob("*_results.jsonl")):
             for line in f.read_text("utf-8").strip().splitlines():
                 if not line:
@@ -422,6 +424,11 @@ def _render_benchmark_page(config: Config) -> str:
                     ms[m]["lat"].append(r["latency_ms"])
                 if r.get("tps"):
                     ms[m]["tps"].append(r["tps"])
+                if r.get("completion_tokens"):
+                    ms[m]["tok"].append(r["completion_tokens"])
+                th = r.get("thinking")
+                if th is not None:
+                    ms[m]["thinking"] = bool(th)
 
         def _tag(cn: str, pct: float) -> str:
             cls = "ok" if pct >= 60 else ("warn" if pct >= 30 else "err")
@@ -431,13 +438,17 @@ def _render_benchmark_page(config: Config) -> str:
             acc = round(s["c"] / s["t"] * 100, 1) if s["t"] else 0
             lat = round(sum(s["lat"]) / len(s["lat"]), 1) if s["lat"] else "-"
             tps = round(sum(s["tps"]) / len(s["tps"]), 2) if s["tps"] else "-"
+            avg_tok = round(sum(s["tok"]) / len(s["tok"]), 0) if s["tok"] else "-"
+            mode = "thinking" if s["thinking"] else "non-thinking" if s["thinking"] is not None else "-"
             tags = "".join(
                 _tag(cn, round(c[1] / c[0] * 100, 1))
                 for cn in ("fact", "reasoning", "math", "chinese", "instruction", "coding")
                 if (c := s["cat"].get(cn)) and c[0]
             )
-            return (f'<tr><td>{name}</td><td class="num" style="font-weight:650">{acc}%</td>'
+            return (f'<tr><td>{name}</td><td>{mode}</td>'
+                    f'<td class="num" style="font-weight:650">{acc}%</td>'
                     f'<td class="num">{s["c"]}/{s["t"]}</td><td>{tags}</td>'
+                    f'<td class="num">{avg_tok}</td>'
                     f'<td class="num">{lat}</td><td class="num">{tps}</td></tr>')
 
         rows = "".join(
@@ -476,6 +487,10 @@ def _render_benchmark_page(config: Config) -> str:
              title="采样条数，0/空 = 全量；有 sample_N_indices.json 时用固定抽样">
       <input type="number" id="concSel" min="1" max="32" value="1" style="width:70px"
              title="并发/批大小：llama.cpp 单槽用 1；SGLang/vLLM 等支持并发的后端可调高（如 4-8）">
+      <select id="thinkSel" title="思考模式：non-thinking 快但能力低；thinking 慢但完整（Qwen3 系区别明显）">
+        <option value="false" selected data-i18n="non_thinking">non-thinking</option>
+        <option value="true" data-i18n="thinking">thinking</option>
+      </select>
       <span class="spacer"></span>
       <button id="selectAllBtn" class="icon-btn" data-i18n="select_all">全选</button>
       <button id="selectNoneBtn" class="icon-btn" data-i18n="select_none">清空</button>
@@ -495,13 +510,15 @@ def _render_benchmark_page(config: Config) -> str:
     <table>
       <thead><tr>
         <th data-i18n="model">模型</th>
+        <th data-i18n="mode">模式</th>
         <th class="num" data-i18n="accuracy">准确率</th>
         <th class="num" data-i18n="correct_total">正确/总数</th>
         <th data-i18n="category">分项</th>
+        <th class="num" data-i18n="avg_tok">平均输出 tokens</th>
         <th class="num" data-i18n="avg_lat">平均耗时 ms</th>
         <th class="num" data-i18n="avg_tps">吞吐 tok/s</th>
       </tr></thead>
-      <tbody id="resultsBody">{rows or '<tr><td colspan="6" class="empty" data-i18n="empty">暂无数据</td></tr>'}</tbody>
+      <tbody id="resultsBody">{rows or '<tr><td colspan="8" class="empty" data-i18n="empty">暂无数据</td></tr>'}</tbody>
     </table>
   </div>
 </main>
@@ -561,6 +578,7 @@ async function runBench() {
     models,
     sample: parseInt($('sampleSel').value, 10) || null,
     concurrency: parseInt($('concSel').value, 10) || 1,
+    enable_thinking: $('thinkSel').value === 'true',
   };
   const r = await authedFetch('/gateway/benchmark/run', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

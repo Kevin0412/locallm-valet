@@ -42,6 +42,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Sample N items (uses sample_N_indices.json when available; default: full).")
     run_p.add_argument("--concurrency", type=int, default=4,
                        help="Parallel requests (batch). Backends like SGLang/vLLM benefit; default: 4.")
+    run_p.add_argument("--thinking", action="store_true",
+                       help="Enable thinking mode (Qwen3 reasoning). Default: non-thinking (fast).")
     run_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
     run_p.add_argument("--output-dir", default="benchmark_results",
@@ -64,6 +66,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Sample N items.")
     cmp_p.add_argument("--concurrency", type=int, default=4,
                        help="Parallel requests (batch); default: 4.")
+    cmp_p.add_argument("--thinking", action="store_true",
+                       help="Enable thinking mode (Qwen3 reasoning). Default: non-thinking.")
     cmp_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL.")
     cmp_p.add_argument("--output-dir", default="benchmark_results",
@@ -81,6 +85,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Sample N items per model (uses sample_N_indices.json when available).")
     all_p.add_argument("--concurrency", type=int, default=4,
                        help="Parallel requests (batch); default: 4.")
+    all_p.add_argument("--thinking", action="store_true",
+                       help="Enable thinking mode (Qwen3 reasoning). Default: non-thinking.")
     all_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
     all_p.add_argument("--output-dir", default="benchmark_results",
@@ -127,6 +133,7 @@ def main(args: argparse.Namespace) -> int:
             max_tokens=args.max_tokens,
             timeout_s=args.timeout,
             concurrency=args.concurrency,
+            enable_thinking=getattr(args, "thinking", False),
         )
         out_path = render_report(
             results=results,
@@ -163,6 +170,7 @@ def main(args: argparse.Namespace) -> int:
                 max_tokens=args.max_tokens,
                 timeout_s=args.timeout,
                 concurrency=args.concurrency,
+                enable_thinking=getattr(args, "thinking", False),
             )
             all_results.extend(results)
         out_path = render_report(
@@ -187,6 +195,7 @@ def main(args: argparse.Namespace) -> int:
                 max_tokens=args.max_tokens,
                 timeout_s=args.timeout,
                 concurrency=args.concurrency,
+                enable_thinking=getattr(args, "thinking", False),
             )
             all_results.extend(results)
         out_path = render_report(

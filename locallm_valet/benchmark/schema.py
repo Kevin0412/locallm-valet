@@ -54,12 +54,22 @@ class BenchmarkResult:
     """Whether extracted answer matches ground_truth."""
     score_detail: str = ""
     """Verbose explanation from the scorer (e.g. 'matched letter B')."""
+    thinking: bool = False
+    """Whether this request ran in thinking mode (reasoning on)."""
     ttft_ms: Optional[float] = None
-    """Time to first token in milliseconds (if measurable)."""
+    """Time to first token in milliseconds (backend timings when available)."""
+    decode_ms: Optional[float] = None
+    """Decode (generation) duration in milliseconds (backend timings)."""
     tps: Optional[float] = None
     """Tokens per second generation throughput."""
     latency_ms: Optional[float] = None
     """Total request round-trip time in milliseconds."""
+    prompt_tokens: Optional[int] = None
+    """Input token count from usage."""
+    completion_tokens: Optional[int] = None
+    """Output token count from usage (includes reasoning tokens when thinking)."""
+    reasoning_tokens: int = 0
+    """Length of the reasoning_content snippet (proxy for reasoning usage)."""
 
     def to_dict(self) -> dict:
         return {
@@ -69,13 +79,18 @@ class BenchmarkResult:
             "choices": self.item.choices,
             "ground_truth": self.item.ground_truth,
             "model_name": self.model_name,
+            "thinking": self.thinking,
             "raw_response": self.raw_response,
             "extracted_answer": self.extracted_answer,
             "is_correct": self.is_correct,
             "score_detail": self.score_detail,
             "ttft_ms": self.ttft_ms,
+            "decode_ms": self.decode_ms,
             "tps": self.tps,
             "latency_ms": self.latency_ms,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
         }
 
 

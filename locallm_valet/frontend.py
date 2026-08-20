@@ -139,6 +139,7 @@ const T = {
     category: '分项', avg_lat: '平均耗时 ms', avg_tps: '吞吐 tok/s',
     running: '运行中', paused: '已暂停', select_all: '全选', select_none: '清空',
     slots_title: '设备槽位', pools_title: '资源池',
+    thinking: '思考', non_thinking: '不思考', mode: '模式', avg_tok: '平均输出 tokens',
   },
   en: {
     dashboard: 'Dashboard', benchmark: 'Benchmark', theme_dark: 'Dark', theme_light: 'Light',
@@ -155,6 +156,7 @@ const T = {
     category: 'Breakdown', avg_lat: 'Avg Latency ms', avg_tps: 'Throughput tok/s',
     running: 'Running', paused: 'Paused', select_all: 'Select All', select_none: 'Clear',
     slots_title: 'Device Slots', pools_title: 'Resource Pools',
+    thinking: 'Thinking', non_thinking: 'Non-thinking', mode: 'Mode', avg_tok: 'Avg output tokens',
   },
 };
 const i18n = key => (T[lang()] && T[lang()][key]) || key;
