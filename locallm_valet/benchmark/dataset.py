@@ -73,8 +73,10 @@ def _cache_dir() -> Path:
 def _load_processed(name: str, sample: int | None = None) -> tuple[list[dict], Optional[dict]]:
     """Load processed.json (+ dev_examples.json if present) from cache.
 
-    ``sample``: when set, apply the fixed ``sample_<N>_indices.json`` subset
-    written by ``benchmark download`` (fallback: first N rows).
+    ``sample``: when set, use the fixed ``sample_<N>_indices.json`` subset if
+    present; otherwise take a STRATIFIED sample (by subject/category, seed 42)
+    so the subject distribution matches the full dataset instead of a flat
+    random draw. ``None`` = full dataset.
     """
     cache = _cache_dir()
     p = cache / name / "processed.json"
@@ -93,9 +95,15 @@ def _load_processed(name: str, sample: int | None = None) -> tuple[list[dict], O
             with open(idx_p, "r", encoding="utf-8") as f:
                 indices: list[int] = json.load(f)
             indices = [i for i in indices if 0 <= i < len(items)]
-            items = [items[i] for i in indices]
+            if indices:
+                items = [items[i] for i in indices]
         else:
-            items = items[:sample]
+            # Stratified by subject/category, reproducible (seed 42), then
+            # persist the indices so every later run uses the same subset.
+            indices = _stratified_indices(items, sample)
+            items = [items[i] for i in indices]
+            _write_sample_indices(cache / name, name, sample, indices)
+            logger.info("Stratified-sampled %d items (seed=42, by subject/category)", len(items))
 
     dev: Optional[dict] = None
     dev_p = cache / name / "dev_examples.json"
@@ -105,6 +113,38 @@ def _load_processed(name: str, sample: int | None = None) -> tuple[list[dict], O
 
     logger.info("Loaded %d items from %s", len(items), p)
     return items, dev
+
+
+def _stratified_indices(items: list[dict], n: int) -> list[int]:
+    """Proportional stratified sample indices by subject (MMLU) or category.
+
+    Every subject/category contributes a share proportional to its size in
+    the full set (minimum 1), so the sampled distribution mirrors the full
+    dataset instead of a flat random draw over/under-representing subjects.
+    Reproducible: seed 42.
+    """
+    random.seed(42)
+    key_of = lambda r: r.get("subject") or r.get("category") or "other"
+    groups: dict[str, list[int]] = {}
+    for i, r in enumerate(items):
+        groups.setdefault(key_of(r), []).append(i)
+
+    chosen: list[int] = []
+    total = len(items)
+    for idxs in groups.values():
+        share = max(1, round(n * len(idxs) / total))
+        chosen.extend(random.sample(idxs, min(share, len(idxs))))
+    random.shuffle(chosen)
+    return chosen[:n]
+
+
+def _write_sample_indices(cache_dir: Path, name: str, sample: int, indices: list[int]) -> None:
+    """Persist sample indices for reproducibility (overwrites stale ones)."""
+    try:
+        out = cache_dir / f"sample_{sample}_indices.json"
+        out.write_text(json.dumps(indices), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - sampling must never break loading
+        logger.warning("could not persist sample indices for %s: %s", name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +201,7 @@ def _from_hf_raw(items_raw: list[dict], dev: Optional[dict]) -> list[BenchmarkIt
         lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in prompt) else "en"
         out.append(BenchmarkItem(
             item_id=row.get("item_id", f"{subject}_{i}"),
-            category=row.get("category", "fact"),
+            category=row.get("category") or subject or "fact",
             question=prompt,
             ground_truth=answer_letter,
             choices=[f"A. {choices[0]}", f"B. {choices[1]}",
@@ -200,7 +240,8 @@ def _from_ref_converted(items_raw: list[dict]) -> list[BenchmarkItem]:
 
         lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in prompt) else "en"
         out.append(BenchmarkItem(
-            item_id=row["item_id"], category=row.get("category", "fact"),
+            item_id=row["item_id"],
+            category=row.get("category") or row.get("subject") or "fact",
             question=prompt, ground_truth=gt,
             choices=choices, language=lang,
         ))
