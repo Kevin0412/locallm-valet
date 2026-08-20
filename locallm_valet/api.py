@@ -523,6 +523,11 @@ def _render_benchmark_page(config: Config) -> str:
 def _benchmark_js() -> str:
     return r"""
 let jobTimer = null;
+
+function stopPolling() {
+  if (jobTimer) { clearInterval(jobTimer); jobTimer = null; }
+}
+
 async function refreshJob() {
   try {
     const r = await authedFetch('/gateway/benchmark/status');
@@ -542,8 +547,7 @@ async function refreshJob() {
       bar.style.width = '100%';
       txt.textContent = j.state.toUpperCase() + (j.error ? ' · ' + j.error : '');
       runBtn.disabled = false; pauseBtn.disabled = true; resumeBtn.disabled = true; stopBtn.disabled = true;
-      if (j.state === 'done' || j.state === 'stopped') { location.reload(); }
-      clearInterval(jobTimer); jobTimer = null;
+      stopPolling();
     }
   } catch (e) {}
 }
@@ -568,6 +572,7 @@ async function runBench() {
     return;
   }
   $('jobErr').textContent = '';
+  stopPolling();
   refreshJob();
   jobTimer = setInterval(refreshJob, 2000);
 }
@@ -581,8 +586,20 @@ $('runBtn').onclick = runBench;
 $('pauseBtn').onclick = async () => { await authedFetch('/gateway/benchmark/pause', { method: 'POST' }); refreshJob(); };
 $('resumeBtn').onclick = async () => { await authedFetch('/gateway/benchmark/resume', { method: 'POST' }); refreshJob(); };
 $('stopBtn').onclick = async () => { await authedFetch('/gateway/benchmark/stop', { method: 'POST' }); refreshJob(); };
-refreshJob();
-jobTimer = setInterval(refreshJob, 3000);
+
+// Poll only while a job is actually running — an idle page must not spam
+// /gateway/benchmark/status every few seconds.
+(async function init() {
+  try {
+    const j = await (await authedFetch('/gateway/benchmark/status')).json();
+    if (j.state === 'running' || j.state === 'paused') {
+      refreshJob();
+      jobTimer = setInterval(refreshJob, 2000);
+    } else {
+      refreshJob();  // renders the terminal state once, then stays quiet
+    }
+  } catch (e) {}
+})();
 """
 
 
