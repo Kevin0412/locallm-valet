@@ -444,6 +444,8 @@ def _render_benchmark_page(config: Config) -> str:
         by_ds: dict = OrderedDict()
         for f in sorted(results_dir.glob("*_results.jsonl")):
             stem = f.stem[:-len("_results")]  # drop trailing _results
+            if stem == "smoke":
+                continue  # built-in smoke dataset is an internal sanity check, not a result
             for line in f.read_text("utf-8").strip().splitlines():
                 if not line:
                     continue
