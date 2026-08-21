@@ -158,19 +158,23 @@ function render(data) {
   if (!series.length) {
     trend.innerHTML = '<span class="muted">' + i18n('empty') + '</span>';
   } else {
-    const first = new Date(series[0].bucket_epoch * 1000);
-    const last = new Date(series[series.length - 1].bucket_epoch * 1000);
+    // Full-window timeline: the chart spans the WHOLE selected range (from
+    // `since` to now), not just the buckets that happen to have data — empty
+    // hours/days stay visible as a dashed baseline so you can see gaps.
+    const nowMs = Date.now();
+    const winStartMs = range > 0 ? (nowMs - range * 1000) : series[0].bucket_epoch * 1000;
+    const winStart = new Date(winStartMs);
     const buckets = [];
     if (groupBy === 'hour') {
       // Backend buckets are UTC-aligned (CAST(epoch/width)*width); the fill-in
       // must use UTC boundaries too, or the local-vs-UTC 8h offset makes every
       // bucket miss. Labels below still render in the browser's local time.
-      const start = new Date(first); start.setUTCMinutes(0, 0, 0);
-      const end = new Date(last); end.setUTCMinutes(0, 0, 0);
+      const start = new Date(winStart); start.setUTCMinutes(0, 0, 0);
+      const end = new Date(nowMs); end.setUTCMinutes(0, 0, 0);
       for (let t = new Date(start); t <= end; t.setUTCHours(t.getUTCHours() + 1)) buckets.push(t.getTime() / 1000);
     } else {
-      const start = new Date(first); start.setUTCHours(0, 0, 0, 0);
-      const end = new Date(last); end.setUTCHours(0, 0, 0, 0);
+      const start = new Date(winStart); start.setUTCHours(0, 0, 0, 0);
+      const end = new Date(nowMs); end.setUTCHours(0, 0, 0, 0);
       for (let t = new Date(start); t <= end; t.setUTCDate(t.getUTCDate() + 1)) buckets.push(t.getTime() / 1000);
     }
     const map = {};
