@@ -449,12 +449,15 @@ def _render_benchmark_page(config: Config) -> str:
                     continue
                 r = json.loads(line)
                 m = r.get("model_name", "?")
+                # Filenames are either {model}_{dataset}_results.jsonl (cloud
+                # job.py) or {dataset}_results.jsonl (CLI render_report).
                 ds = ""
                 if m and stem.startswith(m):
-                    rest = stem[len(m):]
-                    ds = rest.lstrip("_") if rest else ""
-                elif "_" in stem:
-                    ds = stem.rsplit("_", 1)[-1]
+                    ds = stem[len(m):].lstrip("_")
+                elif m and stem.endswith(m):
+                    ds = stem[: -len(m)].rstrip("_")
+                else:
+                    ds = stem  # plain {dataset}_results.jsonl
                 s = by_ds.setdefault(ds, {}).setdefault(
                     m, {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]),
                         "lat": [], "tps": [], "tok": [], "thinking": None}
