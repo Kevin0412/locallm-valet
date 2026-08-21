@@ -15,16 +15,7 @@ from __future__ import annotations
 
 CSS = r"""
 :root {
-  /* dark theme (default) */
-  color-scheme: dark;
-  --bg: #101216; --bg-soft: #16191f; --panel: #1a1e26; --panel-2: #222733;
-  --fg: #e7eaf0; --fg-2: #aab2c0; --fg-3: #7d8694;
-  --accent: #5b8cff; --accent-soft: rgba(91, 140, 255, 0.14);
-  --ok: #3fbf7f; --warn: #d9a441; --err: #e06c6c;
-  --border: #2a2f3a; --border-soft: #232833;
-  --shadow: 0 1px 2px rgba(0,0,0,.25);
-}
-html[data-theme="light"] {
+  /* light theme (default) */
   color-scheme: light;
   --bg: #f5f6f8; --bg-soft: #eceef2; --panel: #ffffff; --panel-2: #f1f3f6;
   --fg: #1d2129; --fg-2: #4a5260; --fg-3: #7b8494;
@@ -32,6 +23,15 @@ html[data-theme="light"] {
   --ok: #1f9d63; --warn: #b97f16; --err: #d14a4a;
   --border: #dfe3ea; --border-soft: #e8ebf0;
   --shadow: 0 1px 2px rgba(20,30,50,.08);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #101216; --bg-soft: #16191f; --panel: #1a1e26; --panel-2: #222733;
+  --fg: #e7eaf0; --fg-2: #aab2c0; --fg-3: #7d8694;
+  --accent: #5b8cff; --accent-soft: rgba(91, 140, 255, 0.14);
+  --ok: #3fbf7f; --warn: #d9a441; --err: #e06c6c;
+  --border: #2a2f3a; --border-soft: #232833;
+  --shadow: 0 1px 2px rgba(0,0,0,.25);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
@@ -174,7 +174,7 @@ const T = {
 };
 const i18n = key => (T[lang()] && T[lang()][key]) || key;
 let lang = () => localStorage.getItem('valet_lang') || 'zh';
-let theme = () => localStorage.getItem('valet_theme') || 'dark';
+let theme = () => localStorage.getItem('valet_theme') || 'light';
 
 function applyTheme() {
   document.documentElement.setAttribute('data-theme', theme());
@@ -238,7 +238,7 @@ def page(title_zh: str, title_en: str, body: str, active: str, extra_js: str = "
     """Render a full page from the shared design system."""
     title = title_zh if lang_default() == "zh" else title_en
     return f"""<!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
