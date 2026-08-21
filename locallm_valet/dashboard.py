@@ -137,7 +137,7 @@ function renderSlots(s) {
 
 function pct(a, b) { return b > 0 ? (100 * a / b).toFixed(1) + '%' : '0%'; }
 
-function render(data, groupBy) {
+function render(data) {
   const s = data.summary;
   const cards = [
     ['Requests', fmt(s.requests), ''],
@@ -229,7 +229,7 @@ async function load() {
   try {
     const r = await authedFetch('/gateway/usage?' + q.toString());
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    render(await r.json(), groupBy);
+    render(await r.json());
     $('refreshAt').textContent = i18n('updated') + ' ' + new Date().toLocaleTimeString();
   } catch (e) {
     $('cards').innerHTML = `<div class="err-text">${i18n('failed')}: ${e.message}</div>`;
