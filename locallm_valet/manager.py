@@ -238,6 +238,24 @@ class ModelManager:
         """
 
         self.active_requests = max(0, self.active_requests - 1)
+
+    def get_slot_manager(self, model_name: str) -> "ModelManager":
+        """Single-slot compatibility: this manager IS the model's slot.
+
+        (SlotManager routes to per-slot ModelManagers; a plain ModelManager
+        — tests / single-active-model setups — serves every model itself.)
+        """
+        return self
+
+    def base_url_for(self, model_name: str) -> str:
+        """Backend base URL for the slot serving ``model_name``."""
+        spec = self.cfg.get_model(model_name)
+        if spec is None:
+            raise ModelNotFound(f"model {model_name!r} is not in the registry")
+        runner_cfg = getattr(getattr(self.runner, "cfg", None), "base_url", None)
+        if runner_cfg:
+            return runner_cfg
+        return self.cfg.backend.base_url
         self.last_activity = self._now()
 
     async def _check_memory(self, spec: ModelSpec, context: str) -> None:

@@ -37,6 +37,22 @@ from .benchmark.job import current_job, start_job, pause_job, resume_job, stop_j
 logger = logging.getLogger(__name__)
 
 
+def _iter_manager_slots(manager):
+    """Yield (slot_name, mgr) for a SlotManager, or a single ("cpu", mgr)
+    for a plain ModelManager (tests / single-active-model setups)."""
+    slots = getattr(manager, "slots", None)
+    if slots:
+        for name, m in slots.items():
+            yield name, m
+    else:
+        yield "cpu", manager
+
+
+def _slots_status(manager) -> dict:
+    return {name: {"state": m.state.value, "model": m.current_model}
+            for name, m in _iter_manager_slots(manager)}
+
+
 def build_manager(config: Config):
     """Wire the pool monitor + per-slot backend runners into a SlotManager.
 
@@ -229,7 +245,7 @@ def create_app(
         if request.method == "GET":
             # No model field in a GET; forward to the first slot with a loaded
             # model (multi-slot: any RUNNING slot works for backend-side GETs).
-            for slot_mgr in manager.slots.values():
+            for _name, slot_mgr in _iter_manager_slots(manager):
                 if slot_mgr.state is State.RUNNING and slot_mgr.current_model:
                     started = time.monotonic()
                     slot_mgr.request_started()
@@ -271,8 +287,7 @@ def create_app(
     @app.get("/gateway/models")
     async def gateway_models():
         return {
-            "slots": {name: {"state": m.state.value, "model": m.current_model}
-                      for name, m in manager.slots.items()},
+            "slots": _slots_status(manager),
             "models": manager.models_status(),
         }
 
@@ -280,13 +295,17 @@ def create_app(
     async def gateway_stop():
         """正常关闭所有槽：空闲时（任意状态）接受并清资源；正在服务时 503。"""
         result = await manager.stop(reason="manual")
-        return {"slots": result}
+        slots = result if isinstance(result, dict) else _slots_status(manager)
+        first = next(iter(slots.values()), {})
+        return {"slots": slots, "state": first.get("state"), "model": first.get("model")}
 
     @app.post("/gateway/force-stop")
     async def gateway_force_stop():
         """强制关闭所有槽：无条件清资源，即使有活跃请求（会切断流式连接）。"""
         result = await manager.stop(reason="manual (forced)", force=True)
-        return {"slots": result}
+        slots = result if isinstance(result, dict) else _slots_status(manager)
+        first = next(iter(slots.values()), {})
+        return {"slots": slots, "state": first.get("state"), "model": first.get("model")}
 
     @app.post("/gateway/preload/{model_name}")
     async def gateway_preload(model_name: str):
