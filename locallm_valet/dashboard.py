@@ -26,10 +26,6 @@ DASHBOARD_HTML = page(
       <option value="0" data-i18n="all">全部</option>
     </select>
     <select id="modelSel"><option value="" data-i18n="all_models">全部模型</option></select>
-    <select id="groupSel">
-      <option value="hour" selected data-i18n="by_hour">按小时</option>
-      <option value="day" data-i18n="by_day">按天</option>
-    </select>
     <button id="refreshBtn" class="icon-btn" data-i18n="refresh">刷新</button>
     <span id="refreshAt" class="muted"></span>
   </div>
@@ -153,7 +149,10 @@ function render(data) {
     `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`
   ).join('');
 
-  // continuous trend
+  // continuous trend — granularity follows the range automatically:
+  // 24h (and 1h) → hourly; 7d / 30d / all → daily. No manual switch.
+  const range = parseInt($('rangeSel').value, 10);
+  const groupBy = (range === 0 || range > 86400) ? 'day' : 'hour';
   const series = data.series || [];
   const trend = $('trend');
   if (!series.length) {
@@ -162,7 +161,7 @@ function render(data) {
     const first = new Date(series[0].bucket_epoch * 1000);
     const last = new Date(series[series.length - 1].bucket_epoch * 1000);
     const buckets = [];
-    if ($('groupSel').value === 'hour') {
+    if (groupBy === 'hour') {
       const start = new Date(first); start.setMinutes(0, 0, 0);
       const end = new Date(last); end.setMinutes(0, 0, 0);
       for (let t = new Date(start); t <= end; t.setHours(t.getHours() + 1)) buckets.push(t.getTime() / 1000);
@@ -178,7 +177,7 @@ function render(data) {
     const pad = n => String(n).padStart(2, '0');
     trend.innerHTML = all.map(x => {
       const t = new Date(x.bucket_epoch * 1000);
-      const lbl = $('groupSel').value === 'hour'
+      const lbl = groupBy === 'hour'
         ? pad(t.getHours()) + ':00'
         : (t.getMonth() + 1) + '-' + pad(t.getDate());
       const title = lbl + ' · out ' + fmt(x.completion_tokens) + ' / in ' + fmt(x.prompt_tokens) + ' / ' + fmt(x.requests) + ' req';
@@ -209,10 +208,12 @@ function render(data) {
 async function load() {
   const range = parseInt($('rangeSel').value, 10);
   const since = range > 0 ? Math.floor(Date.now() / 1000) - range : '';
+  // granularity follows the range: 24h (and 1h) hourly, 7d/30d/all daily
+  const groupBy = (range === 0 || range > 86400) ? 'day' : 'hour';
   const q = new URLSearchParams();
   if (since) q.set('since', since);
   if ($('modelSel').value) q.set('model', $('modelSel').value);
-  q.set('group_by', $('groupSel').value);
+  q.set('group_by', groupBy);
   q.set('limit', '50');
   try {
     const r = await authedFetch('/gateway/usage?' + q.toString());
@@ -227,7 +228,6 @@ async function load() {
 $('refreshBtn').onclick = load;
 $('rangeSel').onchange = load;
 $('modelSel').onchange = load;
-$('groupSel').onchange = load;
 setInterval(load, 15000);
 loadModels();
 load();
