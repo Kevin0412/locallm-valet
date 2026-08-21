@@ -177,14 +177,17 @@ function render(data) {
     const max = Math.max(...all.map(x => x.completion_tokens), 1);
     const pad = n => String(n).padStart(2, '0');
     trend.innerHTML = all.map(x => {
-      const h = Math.max(3, Math.round(100 * x.completion_tokens / max));
       const t = new Date(x.bucket_epoch * 1000);
       const lbl = $('groupSel').value === 'hour'
         ? pad(t.getHours()) + ':00'
         : (t.getMonth() + 1) + '-' + pad(t.getDate());
       const title = lbl + ' · out ' + fmt(x.completion_tokens) + ' / in ' + fmt(x.prompt_tokens) + ' / ' + fmt(x.requests) + ' req';
-      const cls = x.requests > 0 ? 'col' : 'col empty-bar';
-      return `<div class="${cls}" title="${title}"><span class="bar2" style="height:${h}%"></span><span class="lbl">${lbl}</span></div>`;
+      if (x.requests > 0) {
+        const h = Math.max(6, Math.round(100 * x.completion_tokens / max));
+        return `<div class="col" title="${title}"><span class="bar2" style="height:${h}%"></span><span class="lbl">${lbl}</span></div>`;
+      }
+      // zero-data slot: fixed faint baseline keeps the timeline continuous
+      return `<div class="col empty-bar" title="${title}"><span class="bar2" style="height:14px"></span><span class="lbl">${lbl}</span></div>`;
     }).join('');
   }
 

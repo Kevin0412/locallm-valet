@@ -112,7 +112,10 @@ tbody tr:hover { background: var(--bg-soft); }
 .trend .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 3px; min-width: 0; height: 100%; }
 .trend .bar2 { width: 72%; background: linear-gradient(180deg, var(--accent), transparent 140%); border-radius: 3px 3px 0 0; min-height: 2px; }
 .trend .lbl { font-size: 10px; color: var(--fg-3); }
-.trend .col.empty-bar { opacity: .22; }
+/* zero-data slots keep a faint but VISIBLE baseline so the timeline reads
+   as continuous instead of disconnected gaps */
+.trend .col.empty-bar { opacity: 1; }
+.trend .col.empty-bar .bar2 { background: var(--panel-2); border: 1px dashed var(--border); min-height: 14px; }
 
 /* progress */
 .progress { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin: 8px 0 4px; }
