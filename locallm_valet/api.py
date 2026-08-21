@@ -405,10 +405,12 @@ def _render_benchmark_page(config: Config) -> str:
     from .frontend import page
     from .benchmark.dataset import list_datasets
     from .benchmark.job import current_job
+    from .benchmark.runner import load_speeds
 
     models = sorted(config.models.keys())
     datasets = list_datasets()
     job = current_job().status()
+    speeds = load_speeds()  # single-request throughput per model (tok/s)
 
     # Aggregate scored JSONL by (dataset, model) — one table per dataset, so
     # mmlu (500) / mmlu_pro (500) / smoke (6) are never merged into a
@@ -462,7 +464,6 @@ def _render_benchmark_page(config: Config) -> str:
         def _row(name: str, s: dict) -> str:
             acc = round(s["c"] / s["t"] * 100, 1) if s["t"] else 0
             lat = round(sum(s["lat"]) / len(s["lat"]), 1) if s["lat"] else "-"
-            tps = round(sum(s["tps"]) / len(s["tps"]), 2) if s["tps"] else "-"
             avg_tok = round(sum(s["tok"]) / len(s["tok"]), 0) if s["tok"] else "-"
             mode = "thinking" if s["thinking"] else "non-thinking" if s["thinking"] is not None else "-"
             # Real subjects/categories (MMLU has 57) — show the largest few,
@@ -477,11 +478,20 @@ def _render_benchmark_page(config: Config) -> str:
             )
             if len(cats) > 8:
                 tags += f'<span class="muted" style="font-size:11px">+{len(cats)-8}</span>'
+            # Throughput: single-request probe (benchmark_results/speeds.json),
+            # split into prefill and decode phases. NOT the batched per-item
+            # tps average, which is misleading under concurrency.
+            sp = speeds.get(name, {})
+            pre = sp.get("prefill_tps")
+            dec = sp.get("decode_tps")
+            pre_cell = f"{pre:.0f}" if pre else "-"
+            dec_cell = f"{dec:.0f}" if dec else "-"
             return (f'<tr><td class="wrap">{name}</td><td>{mode}</td>'
                     f'<td class="num" style="font-weight:650">{acc}%</td>'
                     f'<td class="num">{s["c"]}/{s["t"]}</td><td class="wrap">{tags}</td>'
                     f'<td class="num">{avg_tok}</td>'
-                    f'<td class="num">{lat}</td><td class="num">{tps}</td></tr>')
+                    f'<td class="num">{lat}</td>'
+                    f'<td class="num">{pre_cell}</td><td class="num">{dec_cell}</td></tr>')
 
         def _table(ds: str, ms: dict) -> str:
             per_model = max((s["t"] for s in ms.values()), default=0)
@@ -490,7 +500,7 @@ def _render_benchmark_page(config: Config) -> str:
                 _row(name, s)
                 for name, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
             )
-            empty = '<tr><td colspan="8" class="empty">暂无数据</td></tr>'
+            empty = '<tr><td colspan="9" class="empty">暂无数据</td></tr>'
             head = ("<thead><tr>"
                     '<th data-i18n="model">模型</th><th data-i18n="mode">模式</th>'
                     '<th class="num" data-i18n="accuracy">准确率</th>'
@@ -498,7 +508,8 @@ def _render_benchmark_page(config: Config) -> str:
                     '<th data-i18n="category">分项</th>'
                     '<th class="num" data-i18n="avg_tok">平均输出 tokens</th>'
                     '<th class="num" data-i18n="avg_lat">平均耗时 ms</th>'
-                    '<th class="num" data-i18n="avg_tps">吞吐 tok/s</th>'
+                    '<th class="num" title="single-request prefill">prefill tok/s</th>'
+                    '<th class="num" title="single-request decode">decode tok/s</th>'
                     "</tr></thead>")
             label = f"{per_model} 题 × {n_models} 模型" if per_model else "暂无数据"
             return (

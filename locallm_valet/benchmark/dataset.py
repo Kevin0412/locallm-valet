@@ -76,7 +76,8 @@ def _load_processed(name: str, sample: int | None = None) -> tuple[list[dict], O
     ``sample``: when set, apply the fixed ``sample_{sample}_indices.json``
     subset written by ``benchmark download`` (reproducible). When no fixed
     indices file exists, fall back to a STRATIFIED random sample by
-    subject/category (seed 42). ``None`` = full dataset.
+    subject/category (seed 42), persisted so later runs reuse the subset.
+    ``None`` = full dataset.
 
     IMPORTANT: processed.json always holds the FULL dataset — sampling is
     purely an index into it, so a later ``sample=None`` run uses everything.
@@ -103,11 +104,14 @@ def _load_processed(name: str, sample: int | None = None) -> tuple[list[dict], O
             if indices:
                 items = [items[i] for i in indices]
                 logger.info("Sampled %d items via %s", len(items), idx_p.name)
-                _write_sample_indices(cache / name, sample, indices)
+                _write_sample_indices(cache / name, name, sample, indices)
                 return _finish_load(name, items)
 
-        # 2) no fixed indices → stratified random sample by subject/category
-        items = _stratified_sample(items, sample)
+        # 2) no fixed indices → stratified sample by subject/category,
+        #    persisted so every later run uses the same subset.
+        indices = _stratified_indices(items, sample)
+        items = [items[i] for i in indices]
+        _write_sample_indices(cache / name, name, sample, indices)
         logger.info("Stratified-sampled %d items (seed=42, by subject/category)", len(items))
 
     return _finish_load(name, items)
@@ -123,40 +127,36 @@ def _finish_load(name: str, items: list[dict]) -> tuple[list[dict], Optional[dic
     return items, dev
 
 
-def _stratified_sample(items: list[dict], n: int) -> list[dict]:
-    """Proportional stratified sample by subject (MMLU) or category.
+def _stratified_indices(items: list[dict], n: int) -> list[int]:
+    """Proportional stratified sample indices by subject (MMLU) or category.
 
-    Keeps the distribution of subjects/categories the same as the full set,
-    instead of a flat random draw which can over/under-represent a subject.
+    Every subject/category contributes a share proportional to its size in
+    the full set (minimum 1), so the sampled distribution mirrors the full
+    dataset instead of a flat random draw over/under-representing subjects.
+    Reproducible: seed 42.
     """
-    import collections
     random.seed(42)
     key_of = lambda r: r.get("subject") or r.get("category") or "other"
-    groups: dict[str, list[int]] = collections.defaultdict(list)
+    groups: dict[str, list[int]] = {}
     for i, r in enumerate(items):
-        groups[key_of(r)].append(i)
+        groups.setdefault(key_of(r), []).append(i)
 
     chosen: list[int] = []
     total = len(items)
-    # round-robin across groups so every group contributes, weighted by size
-    for g, idxs in groups.items():
+    for idxs in groups.values():
         share = max(1, round(n * len(idxs) / total))
         chosen.extend(random.sample(idxs, min(share, len(idxs))))
-    # top up / trim to exactly n, keeping the stratified distribution close
     random.shuffle(chosen)
-    return [items[i] for i in chosen[:n]]
+    return chosen[:n]
 
 
-def _write_sample_indices(cache_dir, sample: int, indices: list[int]) -> None:
-    """Persist the sample indices for reproducibility."""
+def _write_sample_indices(cache_dir: Path, name: str, sample: int, indices: list[int]) -> None:
+    """Persist sample indices for reproducibility (overwrites stale ones)."""
     try:
         out = cache_dir / f"sample_{sample}_indices.json"
-        if not out.is_file():
-            with open(out, "w", encoding="utf-8") as f:
-                json.dump(indices, f)
-            logger.info("wrote %s", out)
-    except Exception:  # noqa: BLE001 - cache write is best-effort
-        logger.warning("could not persist sample indices for %s", sample)
+        out.write_text(json.dumps(indices), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - sampling must never break loading
+        logger.warning("could not persist sample indices for %s: %s", name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +406,101 @@ def _load_humaneval(sample: int | None = None) -> list[BenchmarkItem]:
     """HumanEval (openai, 164 tasks): generate the function body; scored by
     executing the hidden test with the generated candidate (pass@1)."""
     import gzip
+    raw = _github_get(
+        "https://raw.githubusercontent.com/openai/human-eval/master/data/HumanEval.jsonl.gz"
+    )
+    rows = [json.loads(l) for l in gzip.decompress(raw).decode("utf-8").splitlines()]
+
+    if sample is not None and 0 < sample < len(rows):
+        random.seed(42)
+        rows = random.sample(rows, sample)
+
+    items = []
+    for row in rows:
+        prompt = row["prompt"].rstrip()
+        items.append(BenchmarkItem(
+            item_id=row["task_id"],
+            category="coding",
+            question=(
+                f"Complete the following Python function. Return ONLY the code, "
+                f"no explanation, no markdown fences.\n\n{prompt}"
+            ),
+            ground_truth=row.get("canonical_solution", ""),
+            meta={
+                "prompt": row["prompt"],
+                "entry_point": row["entry_point"],
+                "test": row["test"],
+            },
+        ))
+    logger.info("Loaded %d HumanEval items", len(items))
+    return items
+
+
+def _load_mbpp(sample: int | None = None) -> list[BenchmarkItem]:
+    """MBPP (google, 974 tasks): implement a described function; scored by
+    executing the provided assert list against the generated solution."""
+    raw = _github_get(
+        "https://raw.githubusercontent.com/google-research/google-research/master/mbpp/mbpp.jsonl"
+    )
+    rows = [json.loads(l) for l in raw.decode("utf-8").splitlines()]
+
+    if sample is not None and 0 < sample < len(rows):
+        random.seed(42)
+        rows = random.sample(rows, sample)
+
+    items = []
+    for row in rows:
+        items.append(BenchmarkItem(
+            item_id=f"MBPP_{row['task_id']}",
+            category="coding",
+            question=(
+                f"Write a Python function that satisfies: {row['text']}\n"
+                f"Return ONLY the code, no explanation, no markdown fences."
+            ),
+            ground_truth=row.get("code", ""),
+            meta={
+                "test_setup": row.get("test_setup_code", ""),
+                "test_list": row.get("test_list", []),
+            },
+        ))
+    logger.info("Loaded %d MBPP items", len(items))
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Code benchmarks (HumanEval / MBPP) — downloaded from GitHub, cached locally.
+# ---------------------------------------------------------------------------
+
+def _github_get(url: str) -> bytes:
+    """Fetch a raw GitHub file, honouring HTTPS_PROXY if set; caches under
+    dataset_cache/code so the network is only hit once."""
+    import hashlib
+
+    code_cache = _cache_dir() / "code"
+    code_cache.mkdir(parents=True, exist_ok=True)
+    cache_f = code_cache / hashlib.sha1(url.encode()).hexdigest()
+    if cache_f.is_file():
+        return cache_f.read_bytes()
+
+    import httpx
+
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("http_proxy")
+    try:
+        r = httpx.get(url, timeout=90, proxy=proxy)
+        r.raise_for_status()
+    except Exception:
+        # no proxy configured → try direct; Windows boxes often need the proxy
+        r = httpx.get(url, timeout=90)
+        r.raise_for_status()
+    cache_f.write_bytes(r.content)
+    return r.content
+
+
+def _load_humaneval(sample: int | None = None) -> list[BenchmarkItem]:
+    """HumanEval (openai, 164 tasks): generate the function body; scored by
+    executing the hidden test with the generated candidate (pass@1)."""
+    import gzip
+
     raw = _github_get(
         "https://raw.githubusercontent.com/openai/human-eval/master/data/HumanEval.jsonl.gz"
     )

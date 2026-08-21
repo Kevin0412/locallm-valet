@@ -25,6 +25,8 @@ import os
 import random
 from pathlib import Path
 
+from .dataset import _stratified_indices
+
 logger = logging.getLogger("locallm_valet.benchmark.download")
 
 # dataset name -> HF path
@@ -91,8 +93,8 @@ def _download_mmlu(cache: Path, sample: int | None, rng: random.Random) -> None:
     # cais/mmlu has one config per subject + 'all' + 'auxiliary_train'
     ds = load_dataset("cais/mmlu", "all", split="test")
     rows = [dict(r) for r in ds]
-    idx = _pick_indices(len(rows), sample, rng)
-    picked = [rows[i] for i in idx]
+    idx = _stratified_indices(rows, sample)
+    picked = rows
 
     # dev examples: 5-shot per subject present in the sample (streamed, so the
     # large auxiliary_train split is not fully downloaded)
@@ -126,7 +128,7 @@ def _download_mmlu_pro(cache: Path, sample: int | None, rng: random.Random) -> N
 
     ds = load_dataset("TIGER-Lab/MMLU-Pro", split="test")
     rows = [dict(r) for r in ds]
-    idx = _pick_indices(len(rows), sample, rng)
+    idx = _stratified_indices(rows, sample)
     picked = []
     for r in rows:
         options = list(r.get("options") or [])
@@ -137,7 +139,6 @@ def _download_mmlu_pro(cache: Path, sample: int | None, rng: random.Random) -> N
             "ground_truth": r.get("answer", ""),
             "options": options,
         })
-    picked = [picked[i] for i in idx]
     _write_json(cache / "processed.json", picked)
     _write_json(cache / f"sample_{sample}_indices.json", idx) if sample else None
     logger.info("mmlu_pro: %d items cached", len(picked))
@@ -148,7 +149,7 @@ def _download_bfcl(cache: Path, sample: int | None, rng: random.Random) -> None:
 
     ds = load_dataset("Shiyu-Ni/bfcl", split="test")
     rows = [dict(r) for r in ds]
-    idx = _pick_indices(len(rows), sample, rng)
+    idx = _stratified_indices(rows, sample)
     picked = []
     for r in rows:
         msgs = r.get("messages") or []
@@ -163,7 +164,6 @@ def _download_bfcl(cache: Path, sample: int | None, rng: random.Random) -> None:
             "options": [],
             "messages": msgs,
         })
-    picked = [picked[i] for i in idx]
     _write_json(cache / "processed.json", picked)
     _write_json(cache / f"sample_{sample}_indices.json", idx) if sample else None
     logger.info("bfcl: %d items cached", len(picked))
@@ -174,7 +174,7 @@ def _download_mmstar(cache: Path, sample: int | None, rng: random.Random) -> Non
 
     ds = load_dataset("LIUqingqing/MMStar", split="test")
     rows = [dict(r) for r in ds]
-    idx = _pick_indices(len(rows), sample, rng)
+    idx = _stratified_indices(rows, sample)
     picked = []
     for r in rows:
         choices = list(r.get("choices") or [])
@@ -189,7 +189,6 @@ def _download_mmstar(cache: Path, sample: int | None, rng: random.Random) -> Non
             "ground_truth": answer,
             "options": choices,
         })
-    picked = [picked[i] for i in idx]
     _write_json(cache / "processed.json", picked)
     _write_json(cache / f"sample_{sample}_indices.json", idx) if sample else None
     logger.info("mmstar: %d items cached", len(picked))
@@ -200,7 +199,7 @@ def _download_ocrbench(cache: Path, sample: int | None, rng: random.Random) -> N
 
     ds = load_dataset("echo840/OCRBench", split="test")
     rows = [dict(r) for r in ds]
-    idx = _pick_indices(len(rows), sample, rng)
+    idx = _stratified_indices(rows, sample)
     picked = []
     for r in rows:
         q = r.get("question") or r.get("query") or "Recognize the text in the image."
@@ -211,7 +210,6 @@ def _download_ocrbench(cache: Path, sample: int | None, rng: random.Random) -> N
             "ground_truth": r.get("answers", r.get("answer", "")),
             "options": [],
         })
-    picked = [picked[i] for i in idx]
     _write_json(cache / "processed.json", picked)
     _write_json(cache / f"sample_{sample}_indices.json", idx) if sample else None
     logger.info("ocrbench: %d items cached", len(picked))
@@ -329,8 +327,8 @@ def _ms_mmlu(td: str, cache: Path, sample: int | None, rng: random.Random) -> No
 
     data = Path(td) / "data"
     tests = read_csvs(data / "test")
-    idx = _pick_indices(len(tests), sample, rng)
-    picked = [tests[i] for i in idx]
+    idx = _stratified_indices(tests, sample)
+    picked = tests
 
     dev: dict = {}
     try:
@@ -367,8 +365,7 @@ def _ms_mmlu_pro(td: str, cache: Path, sample: int | None, rng: random.Random) -
             "ground_truth": r.get("answer", ""),
             "options": list(r.get("options") or []),
         })
-    idx = _pick_indices(len(picked), sample, rng)
-    picked = [picked[i] for i in idx]
+    idx = _stratified_indices(picked, sample)
     _write_json(cache / "mmlu_pro" / "processed.json", picked)
     if sample:
         _write_json(cache / "mmlu_pro" / f"sample_{sample}_indices.json", idx)
@@ -387,8 +384,8 @@ def _ms_generic(td: str, name: str, cache: Path, sample: int | None, rng: random
     except Exception:  # noqa: BLE001 - try json/csv fallbacks
         ds = load_dataset("json", data_dir=str(data_dir), split="train")
     rows = [dict(r) for r in ds]
-    idx = _pick_indices(len(rows), sample, rng)
-    picked = [rows[i] for i in idx]
+    idx = _stratified_indices(rows, sample)
+    picked = rows
     _write_json(cache / name / "processed.json", picked)
     if sample:
         _write_json(cache / name / f"sample_{sample}_indices.json", idx)

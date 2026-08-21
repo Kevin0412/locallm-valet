@@ -51,6 +51,7 @@ class BenchmarkJob:
     _control: JobControl = field(default_factory=JobControl)
     _thread: Optional[threading.Thread] = None
     _results: list[BenchmarkResult] = field(default_factory=list)
+    speeds: dict = field(default_factory=dict)   # {model: single-request tok/s}
 
     def status(self) -> dict:
         return {
@@ -67,6 +68,7 @@ class BenchmarkJob:
             "error": self.error,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "speeds": self.speeds,
         }
 
     def running(self) -> bool:
@@ -223,6 +225,23 @@ def _slot_worker(job: BenchmarkJob, slot_name: str, models: list[str],
         except Exception as exc:  # noqa: BLE001
             logger.exception("benchmark save failed for %s", model_name)
             job.error = job.error or f"save {model_name}: {exc}"
+        # Single-request throughput probe: the per-item tps above was measured
+        # under batched decode; probe strictly serially for a clean figure.
+        if not job._control.cancel:
+            try:
+                from .runner import probe_single_request_stats, save_speed
+
+                stats = probe_single_request_stats(
+                    model_name=model_name, base_url=job.base_url,
+                    api_key=job.api_key,
+                )
+                save_speed(model_name, stats)
+                job.speeds[model_name] = stats
+                if stats:
+                    logger.info("single-request throughput %s: prefill=%.0f decode=%.0f tok/s",
+                                model_name, stats["prefill_tps"], stats["decode_tps"])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("speed probe failed for %s: %s", model_name, exc)
         if job._control.cancel:
             job.state = "stopped"
             return

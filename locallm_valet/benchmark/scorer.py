@@ -46,6 +46,14 @@ def score_result(result: BenchmarkResult) -> None:
         _score_code(result.raw_response or "", result)
         return
 
+    # Code benchmarks (HumanEval / MBPP): execute the generated code against
+    # the hidden tests in an isolated subprocess — pass@1 style.
+    # NOTE: pass the RAW response (not .strip()'d) — the first line of a
+    # function body is indented and must keep its whitespace.
+    if cat == "coding" and result.item.meta:
+        _score_code(result.raw_response or "", result)
+        return
+
     # Route to appropriate scorer based on whether the item has choices (MCQ) or not
     if result.item.choices:
         _score_mcq(text, gt, result)
@@ -234,7 +242,6 @@ def _score_code(text: str, result: BenchmarkResult) -> None:
     tests. Never eval() in-process — the model output is untrusted."""
     import subprocess
     import sys
-    import textwrap
 
     meta = result.item.meta
     generated = _extract_code(text)
@@ -367,7 +374,6 @@ def _extract_code(text: str) -> str:
       returns the function BODY whose first line is indented (the prompt
       already contains ``def ...:``).
     """
-    import re
     m = re.search(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
     if m:
         return m.group(1).strip("\n")

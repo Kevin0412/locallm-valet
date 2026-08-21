@@ -11,12 +11,13 @@ Usage via ``python -m locallm_valet benchmark``:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
 
 from .dataset import get_dataset, list_datasets
-from .runner import run_benchmark
+from .runner import probe_single_request_stats, run_benchmark, save_speed
 from .report import render_report
 
 logger = logging.getLogger("locallm_valet.benchmark")
@@ -139,6 +140,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                          help="Skip the cold-start (first request incl. load) probe.")
     probe_p.add_argument("--output-dir", default="benchmark_results",
                          help="Directory for the probe JSONL.")
+    probe_p.add_argument("--api-key", default=None,
+                         help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
 
 def _resolve_api_key(args: argparse.Namespace) -> str:
@@ -197,18 +200,13 @@ def _capped_concurrency(requested: int, caps: dict[str, int], model: str) -> int
 def main(args: argparse.Namespace) -> int:
     """Entry point for the ``benchmark`` subcommand."""
 
-    api_key = _resolve_api_key(args)
-
     if args.bench_cmd == "probe":
         from .probe import probe_speed, probe_to_jsonl
         from pathlib import Path
         print(f"Speed probe: {args.model} @ {args.base_url}")
-        result = probe_speed(
-            model_name=args.model,
-            base_url=args.base_url,
-            include_cold_start=not args.no_cold_start,
-        )
-        import json
+        result = probe_speed(model_name=args.model, base_url=args.base_url,
+                             api_key=_resolve_api_key(args),
+                             include_cold_start=not args.no_cold_start)
         print(json.dumps(result["metrics"], ensure_ascii=False, indent=2))
         out = Path(args.output_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -216,6 +214,8 @@ def main(args: argparse.Namespace) -> int:
         probe_to_jsonl(result, str(path))
         print(f"\nProbe saved to: {path}")
         return 0
+
+    api_key = _resolve_api_key(args)
 
     if args.bench_cmd == "list-datasets":
         print("Available datasets:")
@@ -272,6 +272,11 @@ def main(args: argparse.Namespace) -> int:
             retries=args.retries,
             enable_thinking=getattr(args, "thinking", False),
         )
+        stats = probe_single_request_stats(model_name=args.model, base_url=args.base_url, api_key=api_key)
+        save_speed(args.model, stats)
+        if stats:
+            logger.info("single-request throughput %s: prefill=%.0f decode=%.0f tok/s",
+                        args.model, stats["prefill_tps"], stats["decode_tps"])
         out_path = render_report(
             results=results,
             dataset_name=args.dataset,
@@ -319,6 +324,11 @@ def main(args: argparse.Namespace) -> int:
                 enable_thinking=getattr(args, "thinking", False),
             )
             all_results.extend(results)
+            stats = probe_single_request_stats(model_name=model_name, base_url=args.base_url, api_key=api_key)
+            save_speed(model_name, stats)
+            if stats:
+                logger.info("single-request throughput %s: prefill=%.0f decode=%.0f tok/s",
+                            model_name, stats["prefill_tps"], stats["decode_tps"])
         out_path = render_report(
             results=all_results,
             dataset_name=args.dataset,
@@ -351,6 +361,11 @@ def main(args: argparse.Namespace) -> int:
                 enable_thinking=getattr(args, "thinking", False),
             )
             all_results.extend(results)
+            stats = probe_single_request_stats(model_name=model_name, base_url=args.base_url, api_key=api_key)
+            save_speed(model_name, stats)
+            if stats:
+                logger.info("single-request throughput %s: prefill=%.0f decode=%.0f tok/s",
+                            model_name, stats["prefill_tps"], stats["decode_tps"])
         out_path = render_report(
             results=all_results,
             dataset_name=args.dataset,

@@ -16,6 +16,7 @@ from __future__ import annotations
 CSS = r"""
 :root {
   /* dark theme (default) */
+  color-scheme: dark;
   --bg: #101216; --bg-soft: #16191f; --panel: #1a1e26; --panel-2: #222733;
   --fg: #e7eaf0; --fg-2: #aab2c0; --fg-3: #7d8694;
   --accent: #5b8cff; --accent-soft: rgba(91, 140, 255, 0.14);
@@ -24,6 +25,7 @@ CSS = r"""
   --shadow: 0 1px 2px rgba(0,0,0,.25);
 }
 html[data-theme="light"] {
+  color-scheme: light;
   --bg: #f5f6f8; --bg-soft: #eceef2; --panel: #ffffff; --panel-2: #f1f3f6;
   --fg: #1d2129; --fg-2: #4a5260; --fg-3: #7b8494;
   --accent: #2f6bff; --accent-soft: rgba(47, 107, 255, 0.10);
@@ -57,12 +59,14 @@ a:hover { text-decoration: underline; }
 }
 .nav a.active { color: var(--fg); background: var(--accent-soft); }
 .spacer { flex: 1; }
-.icon-btn, select, button {
+.icon-btn, select, button, input {
   background: var(--panel); color: var(--fg); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 11px; font-size: 13px; cursor: pointer;
   font-family: inherit;
 }
-.icon-btn:hover, button:hover, select:hover { border-color: var(--accent); }
+/* native dropdown list & multi-select items follow the theme too */
+select option { background: var(--panel); color: var(--fg); }
+.icon-btn:hover, button:hover, select:hover, input:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.primary:hover { filter: brightness(1.08); }
 button.danger { color: var(--err); border-color: var(--err); }

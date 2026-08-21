@@ -137,7 +137,7 @@ function renderSlots(s) {
 
 function pct(a, b) { return b > 0 ? (100 * a / b).toFixed(1) + '%' : '0%'; }
 
-function render(data) {
+function render(data, groupBy) {
   const s = data.summary;
   const cards = [
     ['Requests', fmt(s.requests), ''],
@@ -162,13 +162,16 @@ function render(data) {
     const last = new Date(series[series.length - 1].bucket_epoch * 1000);
     const buckets = [];
     if (groupBy === 'hour') {
-      const start = new Date(first); start.setMinutes(0, 0, 0);
-      const end = new Date(last); end.setMinutes(0, 0, 0);
-      for (let t = new Date(start); t <= end; t.setHours(t.getHours() + 1)) buckets.push(t.getTime() / 1000);
+      // Backend buckets are UTC-aligned (CAST(epoch/width)*width); the fill-in
+      // must use UTC boundaries too, or the local-vs-UTC 8h offset makes every
+      // bucket miss. Labels below still render in the browser's local time.
+      const start = new Date(first); start.setUTCMinutes(0, 0, 0);
+      const end = new Date(last); end.setUTCMinutes(0, 0, 0);
+      for (let t = new Date(start); t <= end; t.setUTCHours(t.getUTCHours() + 1)) buckets.push(t.getTime() / 1000);
     } else {
-      const start = new Date(first); start.setHours(0, 0, 0, 0);
-      const end = new Date(last); end.setHours(0, 0, 0, 0);
-      for (let t = new Date(start); t <= end; t.setDate(t.getDate() + 1)) buckets.push(t.getTime() / 1000);
+      const start = new Date(first); start.setUTCHours(0, 0, 0, 0);
+      const end = new Date(last); end.setUTCHours(0, 0, 0, 0);
+      for (let t = new Date(start); t <= end; t.setUTCDate(t.getUTCDate() + 1)) buckets.push(t.getTime() / 1000);
     }
     const map = {};
     for (const x of series) map[x.bucket_epoch] = x;
@@ -199,10 +202,18 @@ function render(data) {
   ).join('') || `<tr><td colspan="6" class="empty">${i18n('empty')}</td></tr>`;
 
   $('recentTable').querySelector('tbody').innerHTML = data.recent.map(r =>
-    `<tr><td>${(r.ts || '').replace('T', ' ').slice(0, 19)}</td><td>${r.model}</td><td>${r.endpoint}</td>
+    `<tr><td>${fmtTs(r.ts)}</td><td>${r.model}</td><td>${r.endpoint}</td>
      <td class="num">${r.status ?? '—'}</td><td class="num">${fmt(r.prompt_tokens)}</td>
      <td class="num">${fmt(r.completion_tokens)}</td><td class="num">${fmt(r.duration_ms)}</td></tr>`
   ).join('') || `<tr><td colspan="7" class="empty">${i18n('empty')}</td></tr>`;
+}
+
+function fmtTs(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return (iso || '').replace('T', ' ').slice(0, 19);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+         ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
 async function load() {
@@ -218,7 +229,7 @@ async function load() {
   try {
     const r = await authedFetch('/gateway/usage?' + q.toString());
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    render(await r.json());
+    render(await r.json(), groupBy);
     $('refreshAt').textContent = i18n('updated') + ' ' + new Date().toLocaleTimeString();
   } catch (e) {
     $('cards').innerHTML = `<div class="err-text">${i18n('failed')}: ${e.message}</div>`;

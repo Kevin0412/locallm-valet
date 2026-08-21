@@ -72,7 +72,7 @@ def test_quoted_paths_with_spaces():
 def test_manager_pythonpath_does_not_leak():
     """The manager's PYTHONPATH must not reach the backend child — the child
     uses its own interpreter's site-packages."""
-    base = {"PATH": "/usr/bin", "PYTHONPATH": "/home/test/locallm-valet/.deps:/home/test/locallm-valet"}
+    base = {"PATH": "/usr/bin", "PYTHONPATH": "/opt/locallm-valet/.deps:/opt/locallm-valet"}
     env = build_process_env(BackendConfig(), make_spec(), device=3, base_env=base)
     assert "PYTHONPATH" not in env
     assert env["CUDA_VISIBLE_DEVICES"] == "3"
