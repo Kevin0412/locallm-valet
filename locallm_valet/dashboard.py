@@ -36,7 +36,10 @@ DASHBOARD_HTML = page(
 
   <div class="panel">
     <h2 data-i18n="trend_title">输出趋势</h2>
-    <div class="trend" id="trend"></div>
+    <div class="trend-wrap">
+      <div class="trend-y" id="trendY"></div>
+      <div class="trend" id="trend"></div>
+    </div>
   </div>
 
   <div class="panel">
@@ -182,6 +185,10 @@ function render(data) {
     const all = buckets.map(e => map[e] || { bucket_epoch: e, completion_tokens: 0, prompt_tokens: 0, requests: 0 });
     const max = Math.max(...all.map(x => x.completion_tokens), 1);
     const pad = n => String(n).padStart(2, '0');
+    // y-axis ticks (short numbers) at 0/25/50/75/100% of the max bucket
+    const fmtShort = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? Math.round(n / 1000) + 'k' : String(n);
+    $('trendY').innerHTML = [4, 3, 2, 1, 0].map(i =>
+      `<span class="tick">${fmtShort(max * i / 4)}</span>`).join('');
     trend.innerHTML = all.map(x => {
       const t = new Date(x.bucket_epoch * 1000);
       const lbl = groupBy === 'hour'
@@ -190,10 +197,10 @@ function render(data) {
       const title = lbl + ' · out ' + fmt(x.completion_tokens) + ' / in ' + fmt(x.prompt_tokens) + ' / ' + fmt(x.requests) + ' req';
       if (x.requests > 0) {
         const h = Math.max(6, Math.round(100 * x.completion_tokens / max));
-        return `<div class="col" title="${title}"><span class="bar2" style="height:${h}%"></span><span class="lbl">${lbl}</span></div>`;
+        return `<div class="col" title="${title}"><span class="bar-val">${fmtShort(x.completion_tokens)}</span><span class="bar2" style="height:${h}%"></span><span class="lbl">${lbl}</span></div>`;
       }
       // zero-data slot: fixed faint baseline keeps the timeline continuous
-      return `<div class="col empty-bar" title="${title}"><span class="bar2" style="height:14px"></span><span class="lbl">${lbl}</span></div>`;
+      return `<div class="col empty-bar" title="${title}"><span class="bar-val">0</span><span class="bar2" style="height:14px"></span><span class="lbl">${lbl}</span></div>`;
     }).join('');
   }
 
