@@ -181,7 +181,7 @@ def _run_one(
         result.latency_ms = round(elapsed * 1000, 1)
         result.prompt_tokens = prompt_tokens
         result.completion_tokens = completion_tokens
-        result.reasoning_tokens = len(reasoning_text)
+        result.reasoning_tokens = usage.get("reasoning_tokens") or len(reasoning_text) or 0
         if completion_tokens > 0 and elapsed > 0:
             result.tps = round(completion_tokens / elapsed, 2)
 

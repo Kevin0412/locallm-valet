@@ -43,8 +43,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help=f"Dataset name (default: mmlu). Available: {', '.join(list_datasets())}")
     run_p.add_argument("--sample", type=int, default=None,
                        help="Sample N items (uses sample_N_indices.json when available; default: full).")
-    run_p.add_argument("--thinking", action="store_true",
-                       help="Enable thinking mode (Qwen3 reasoning). Default: non-thinking (fast).")
+    run_p.add_argument("--no-thinking", action="store_false", dest="thinking", default=True,
+                       help="Disable thinking/reasoning (fast sanity mode; understates ability).")
     run_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
     run_p.add_argument("--output-dir", default="benchmark_results",
@@ -72,8 +72,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help=f"Dataset name (default: mmlu).")
     cmp_p.add_argument("--sample", type=int, default=None,
                        help="Sample N items.")
-    cmp_p.add_argument("--thinking", action="store_true",
-                       help="Enable thinking mode (Qwen3 reasoning). Default: non-thinking.")
+    cmp_p.add_argument("--no-thinking", action="store_false", dest="thinking", default=True,
+                       help="Disable thinking/reasoning (fast sanity mode).")
     cmp_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL.")
     cmp_p.add_argument("--output-dir", default="benchmark_results",
@@ -111,8 +111,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                             "max_concurrency when declared (default 4).")
     all_p.add_argument("--retries", type=int, default=2,
                        help="Extra attempts per item on timeout/5xx (default: 2).")
-    all_p.add_argument("--thinking", action="store_true",
-                       help="Enable thinking mode (Qwen3 reasoning). Default: non-thinking (fast).")
+    all_p.add_argument("--no-thinking", action="store_false", dest="thinking", default=True,
+                       help="Disable thinking/reasoning for all models (fast sanity mode; understates ability).")
     all_p.add_argument("--api-key", default=None,
                        help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
