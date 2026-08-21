@@ -221,16 +221,12 @@ def _persist_model_results(results, dataset: str, output_dir: str) -> None:
             existing = [json.loads(l) for l in path.read_text("utf-8").splitlines() if l.strip()]
         except Exception:  # noqa: BLE001
             existing = []
-    # 按 (model, item_id) 去重，保留新的
-    seen = {(r["model_name"], r["item_id"]) for r in existing}
-    for r in results:
-        key = (r.model_name, r.item.item_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        existing.append(r.to_dict())
-    path.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in existing) + "\n", encoding="utf-8")
-    logger.info("partial results saved: %s (%d 条)", path, len(existing))
+    # 新的记录覆盖旧的（同一 model+item_id）——不保留陈旧结果（如旧 no-think 数据）
+    new_map = {(r.model_name, r.item.item_id): r.to_dict() for r in results}
+    merged = [x for x in existing if (x["model_name"], x["item_id"]) not in new_map]
+    merged.extend(new_map.values())
+    path.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in merged) + "\n", encoding="utf-8")
+    logger.info("partial results saved: %s (%d 条)", path, len(merged))
 
 
 def main(args: argparse.Namespace) -> int:
