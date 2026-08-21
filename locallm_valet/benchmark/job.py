@@ -36,10 +36,10 @@ class BenchmarkJob:
     models: list[str] = field(default_factory=list)
     base_url: str = "http://127.0.0.1:8000/v1"
     api_key: str = ""
-    max_tokens: int = 256
+    max_tokens: int = 64000
     sample: Optional[int] = None
     concurrency: int = 1
-    enable_thinking: bool = False
+    enable_thinking: bool = True
     state: str = "idle"          # idle | running | paused | done | error | stopped
     current_model: str = ""
     current_item: int = 0
@@ -91,15 +91,16 @@ def start_job(
     max_tokens: int,
     sample: Optional[int] = None,
     concurrency: int = 1,
-    enable_thinking: bool = False,
+    enable_thinking: bool = True,
     api_key: str = "",
     output_dir: str = "benchmark_results",
     slot_of: Optional[dict] = None,
 ) -> BenchmarkJob:
     """Start a benchmark job in background threads (no-op if already running).
 
-    ``enable_thinking``: False = non-thinking mode (default, fast);
-    True = thinking mode (slower, higher quality) — recorded per result so
+    ``enable_thinking``: True (default) = thinking mode — what the official
+    model-card numbers use; False = non-thinking fast sanity mode; recorded
+    per result so
     both deployment modes can be compared.
 
     ``api_key``: forwarded to the runner so requests stay authenticated when

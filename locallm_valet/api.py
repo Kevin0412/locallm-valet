@@ -384,10 +384,10 @@ def create_app(
                 models=[str(m) for m in models],
                 base_url=f"http://127.0.0.1:{config.server.port}/v1",
                 api_key=api_key,
-                max_tokens=int(payload.get("max_tokens", 256)),
+                max_tokens=int(payload.get("max_tokens", 64000)),
                 sample=payload.get("sample"),
                 concurrency=int(payload.get("concurrency", 1)),
-                enable_thinking=bool(payload.get("enable_thinking", False)),
+                enable_thinking=bool(payload.get("enable_thinking", True)),
                 slot_of={m: config.models[m].slot for m in models if m in config.models},
             )
             return job.status()
@@ -462,7 +462,7 @@ def _render_benchmark_page(config: Config) -> str:
                     ds = stem  # plain {dataset}_results.jsonl
                 s = by_ds.setdefault(ds, {}).setdefault(
                     m, {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]),
-                        "lat": [], "tps": [], "tok": [], "thinking": None}
+                        "lat": [], "tps": [], "tok": [], "reason": [], "thinking": None}
                 )
                 s["t"] += 1
                 if r.get("is_correct") is True:
@@ -477,6 +477,8 @@ def _render_benchmark_page(config: Config) -> str:
                     s["tps"].append(r["tps"])
                 if r.get("completion_tokens"):
                     s["tok"].append(r["completion_tokens"])
+                if r.get("reasoning_tokens"):
+                    s["reason"].append(r["reasoning_tokens"])
                 th = r.get("thinking")
                 if th is not None:
                     s["thinking"] = bool(th)
@@ -489,6 +491,7 @@ def _render_benchmark_page(config: Config) -> str:
             acc = round(s["c"] / s["t"] * 100, 1) if s["t"] else 0
             lat = round(sum(s["lat"]) / len(s["lat"]), 1) if s["lat"] else "-"
             avg_tok = round(sum(s["tok"]) / len(s["tok"]), 0) if s["tok"] else "-"
+            avg_reason = round(sum(s["reason"]) / len(s["reason"]), 0) if s["reason"] else "-"
             mode = "thinking" if s["thinking"] else "non-thinking" if s["thinking"] is not None else "-"
             # Real subjects/categories (MMLU has 57) — show the largest few,
             # keep the rest as a +N count so the cell doesn't explode.
@@ -513,6 +516,7 @@ def _render_benchmark_page(config: Config) -> str:
             return (f'<tr><td class="wrap">{name}</td><td>{mode}</td>'
                     f'<td class="num" style="font-weight:650">{acc}%</td>'
                     f'<td class="num">{s["c"]}/{s["t"]}</td><td class="wrap">{tags}</td>'
+                    f'<td class="num">{avg_reason}</td>'
                     f'<td class="num">{avg_tok}</td>'
                     f'<td class="num">{lat}</td>'
                     f'<td class="num">{pre_cell}</td><td class="num">{dec_cell}</td></tr>')
@@ -524,12 +528,13 @@ def _render_benchmark_page(config: Config) -> str:
                 _row(name, s)
                 for name, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
             )
-            empty = '<tr><td colspan="9" class="empty">暂无数据</td></tr>'
+            empty = '<tr><td colspan="10" class="empty">暂无数据</td></tr>'
             head = ("<thead><tr>"
                     '<th data-i18n="model">模型</th><th data-i18n="mode">模式</th>'
                     '<th class="num" data-i18n="accuracy">准确率</th>'
                     '<th class="num" data-i18n="correct_total">正确/总数</th>'
                     '<th data-i18n="category">分项</th>'
+                    '<th class="num" title="平均思考 tokens（thinking 模式下的 reasoning 消耗）">平均思考 tokens</th>'
                     '<th class="num" data-i18n="avg_tok">平均输出 tokens</th>'
                     '<th class="num" data-i18n="avg_lat">平均耗时 ms</th>'
                     '<th class="num" title="single-request prefill">prefill tok/s</th>'
@@ -576,7 +581,8 @@ def _render_benchmark_page(config: Config) -> str:
       <input type="number" id="concSel" min="1" max="32" value="1" style="width:70px"
              title="并发/批大小：llama.cpp 单槽用 1；SGLang/vLLM 等支持并发的后端可调高（如 4-8）">
       <select id="thinkSel" title="思考模式：non-thinking 快但能力低；thinking 慢但完整（Qwen3 系区别明显）">
-        <option value="false" selected data-i18n="non_thinking">non-thinking</option>
+        <option value="true" selected data-i18n="thinking">thinking</option>
+        <option value="false" data-i18n="non_thinking">non-thinking</option>
         <option value="true" data-i18n="thinking">thinking</option>
       </select>
       <span class="spacer"></span>

@@ -90,12 +90,13 @@ def _run_one(
     save_responses: bool,
     total: int,
     control: JobControl | None = None,
-    enable_thinking: bool = False,
+    enable_thinking: bool = True,
 ) -> BenchmarkResult:
     """Run a single benchmark item (directly, or via the thread pool).
 
-    ``enable_thinking=False`` disables reasoning (Qwen3 non-thinking mode);
-    ``True`` lets the model think (thinking mode — slower, higher quality,
+    ``enable_thinking=True`` (default) lets the model think — the mode the
+    official model cards are benchmarked in; ``False`` disables reasoning
+    (fast but understates ability — only for quick sanity runs),
     burns output tokens on reasoning_content). The mode is recorded on the
     result so accuracy/latency can be compared across modes.
     """
@@ -252,7 +253,7 @@ def run_benchmark(
     retries: int = 2,
     save_responses: bool = True,
     control: JobControl | None = None,
-    enable_thinking: bool = False,
+    enable_thinking: bool = True,
 ) -> list[BenchmarkResult]:
     """Run a list of benchmark items through the valet API.
 

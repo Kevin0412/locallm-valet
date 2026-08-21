@@ -49,8 +49,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
     run_p.add_argument("--output-dir", default="benchmark_results",
                        help="Output directory for results / report (default: benchmark_results/).")
-    run_p.add_argument("--max-tokens", type=int, default=256,
-                       help="Max generation tokens per question (default: 256).")
+    run_p.add_argument("--max-tokens", type=int, default=64000,
+                       help="Max generation tokens per question — thinking needs budget (default: 64000).")
     run_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds (default: 180).")
     run_p.add_argument("--concurrency", type=int, default=4,
@@ -78,8 +78,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Valet OpenAI-compatible base URL.")
     cmp_p.add_argument("--output-dir", default="benchmark_results",
                        help="Output directory.")
-    cmp_p.add_argument("--max-tokens", type=int, default=256,
-                       help="Max generation tokens.")
+    cmp_p.add_argument("--max-tokens", type=int, default=64000,
+                       help="Max generation tokens — thinking needs budget (default: 64000).")
     cmp_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds.")
     cmp_p.add_argument("--concurrency", type=int, default=4,
@@ -98,8 +98,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
     all_p.add_argument("--output-dir", default="benchmark_results",
                        help="Output directory (default: benchmark_results/).")
-    all_p.add_argument("--max-tokens", type=int, default=256,
-                       help="Max generation tokens per question (default: 256).")
+    all_p.add_argument("--max-tokens", type=int, default=64000,
+                       help="Max generation tokens per question — thinking needs budget (default: 64000).")
     all_p.add_argument("--timeout", type=int, default=180,
                        help="Per-request timeout in seconds (default: 180).")
     all_p.add_argument("--skip-models", nargs="*", default=[],
@@ -270,7 +270,7 @@ def main(args: argparse.Namespace) -> int:
             timeout_s=args.timeout,
             concurrency=concurrency,
             retries=args.retries,
-            enable_thinking=getattr(args, "thinking", False),
+            enable_thinking=getattr(args, "thinking", True),
         )
         stats = probe_single_request_stats(model_name=args.model, base_url=args.base_url, api_key=api_key)
         save_speed(args.model, stats)
@@ -321,7 +321,7 @@ def main(args: argparse.Namespace) -> int:
                 timeout_s=args.timeout,
                 concurrency=concurrency,
                 retries=args.retries,
-                enable_thinking=getattr(args, "thinking", False),
+                enable_thinking=getattr(args, "thinking", True),
             )
             all_results.extend(results)
             stats = probe_single_request_stats(model_name=model_name, base_url=args.base_url, api_key=api_key)
@@ -358,7 +358,7 @@ def main(args: argparse.Namespace) -> int:
                 timeout_s=args.timeout,
                 concurrency=concurrency,
                 retries=args.retries,
-                enable_thinking=getattr(args, "thinking", False),
+                enable_thinking=getattr(args, "thinking", True),
             )
             all_results.extend(results)
             stats = probe_single_request_stats(model_name=model_name, base_url=args.base_url, api_key=api_key)
