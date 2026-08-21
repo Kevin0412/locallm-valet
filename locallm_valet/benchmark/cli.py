@@ -197,6 +197,42 @@ def _capped_concurrency(requested: int, caps: dict[str, int], model: str) -> int
     return min(requested, cap)
 
 
+def _persist_model_results(results, dataset: str, output_dir: str) -> None:
+    """Append a model's scored results to {dataset}_results.jsonl right away,
+    so a long multi-model run shows partial progress (and survives a crash).
+    Rewrites the file with the union of existing + new records."""
+    from pathlib import Path
+
+    from .scorer import score_result
+
+    for r in results:
+        if r.is_correct is None:
+            try:
+                score_result(r)
+            except Exception:  # noqa: BLE001
+                r.is_correct = False
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"{dataset}_results.jsonl"
+    existing: list[dict] = []
+    if path.is_file():
+        try:
+            existing = [json.loads(l) for l in path.read_text("utf-8").splitlines() if l.strip()]
+        except Exception:  # noqa: BLE001
+            existing = []
+    # 按 (model, item_id) 去重，保留新的
+    seen = {(r["model_name"], r["item_id"]) for r in existing}
+    for r in results:
+        key = (r.model_name, r.item.item_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        existing.append(r.to_dict())
+    path.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in existing) + "\n", encoding="utf-8")
+    logger.info("partial results saved: %s (%d 条)", path, len(existing))
+
+
 def main(args: argparse.Namespace) -> int:
     """Entry point for the ``benchmark`` subcommand."""
 
@@ -324,6 +360,10 @@ def main(args: argparse.Namespace) -> int:
                 enable_thinking=getattr(args, "thinking", True),
             )
             all_results.extend(results)
+            try:
+                _persist_model_results(results, args.dataset, args.output_dir)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("partial save failed for %s: %s", model_name, exc)
             stats = probe_single_request_stats(model_name=model_name, base_url=args.base_url, api_key=api_key)
             save_speed(model_name, stats)
             if stats:
