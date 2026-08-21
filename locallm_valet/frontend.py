@@ -87,10 +87,14 @@ main { max-width: 1180px; margin: 0 auto; padding: 22px; }
 .panel > h2 { font-size: 13px; font-weight: 650; color: var(--fg-2); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 14px; }
 
 /* tables */
+.table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
+/* long cells (model names, category tags, ground truth) wrap instead of
+   blowing the table box; numeric cells stay nowrap */
+td.wrap, th.wrap { white-space: normal; word-break: break-word; }
 th { color: var(--fg-3); font-weight: 600; font-size: 12px; }
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 tbody tr:hover { background: var(--bg-soft); }
 .empty { color: var(--fg-3); text-align: center; padding: 22px 0; }
 

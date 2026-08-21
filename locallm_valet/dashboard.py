@@ -45,9 +45,10 @@ DASHBOARD_HTML = page(
 
   <div class="panel">
     <h2 data-i18n="by_model_title">按模型</h2>
+    <div class="table-scroll">
     <table id="modelTable">
       <thead><tr>
-        <th data-i18n="model">模型</th>
+        <th class="wrap" data-i18n="model">模型</th>
         <th class="num" data-i18n="requests">请求数</th>
         <th class="num" data-i18n="in_tokens">输入 tokens</th>
         <th class="num" data-i18n="out_tokens">输出 tokens</th>
@@ -56,18 +57,21 @@ DASHBOARD_HTML = page(
       </tr></thead>
       <tbody></tbody>
     </table>
+    </div>
   </div>
 
   <div class="panel">
     <h2 data-i18n="recent_title">最近请求</h2>
+    <div class="table-scroll">
     <table id="recentTable">
       <thead><tr>
-        <th data-i18n="time">时间</th><th data-i18n="model">模型</th><th data-i18n="endpoint">接口</th>
+        <th data-i18n="time">时间</th><th class="wrap" data-i18n="model">模型</th><th data-i18n="endpoint">接口</th>
         <th class="num" data-i18n="status">状态</th><th class="num" data-i18n="in_tokens">输入</th>
         <th class="num" data-i18n="out_tokens">输出</th><th class="num" data-i18n="duration">耗时 ms</th>
       </tr></thead>
       <tbody></tbody>
     </table>
+    </div>
   </div>
 </main>
 <style>
@@ -125,13 +129,13 @@ function renderSlots(s) {
       <span class="muted">${pct}%</span></div></td></tr>`;
   }
   wrap.innerHTML = rows
-    ? `<div class="panel"><h2 data-i18n="slots_title">设备槽位</h2><table>
-         <thead><tr><th>Slot</th><th data-i18n="status">状态</th><th data-i18n="model">模型</th>
+    ? `<div class="panel"><h2 data-i18n="slots_title">设备槽位</h2><div class="table-scroll"><table>
+         <thead><tr><th>Slot</th><th data-i18n="status">状态</th><th class="wrap" data-i18n="model">模型</th>
          <th class="num" data-i18n="requests">请求数</th><th class="num">Ctx</th></tr></thead>
-         <tbody>${rows}</tbody></table></div>
-       <div class="panel"><h2 data-i18n="pools_title">资源池</h2><table>
+         <tbody>${rows}</tbody></table></div></div>
+       <div class="panel"><h2 data-i18n="pools_title">资源池</h2><div class="table-scroll"><table>
          <thead><tr><th>Pool</th><th class="num">可用/总量</th><th>占用</th></tr></thead>
-         <tbody>${poolRows}</tbody></table></div>`
+         <tbody>${poolRows}</tbody></table></div></div>`
     : '<div class="panel"><h2 data-i18n="slots_title">设备槽位</h2><p class="empty">—</p></div>';
 }
 

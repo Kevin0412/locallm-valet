@@ -462,14 +462,21 @@ def _render_benchmark_page(config: Config) -> str:
             tps = round(sum(s["tps"]) / len(s["tps"]), 2) if s["tps"] else "-"
             avg_tok = round(sum(s["tok"]) / len(s["tok"]), 0) if s["tok"] else "-"
             mode = "thinking" if s["thinking"] else "non-thinking" if s["thinking"] is not None else "-"
-            tags = "".join(
-                _tag(cn, round(c[1] / c[0] * 100, 1))
-                for cn in ("fact", "reasoning", "math", "chinese", "instruction", "coding")
-                if (c := s["cat"].get(cn)) and c[0]
+            # Real subjects/categories (MMLU has 57) — show the largest few,
+            # keep the rest as a +N count so the cell doesn't explode.
+            cats = sorted(
+                (cn for cn, c in s["cat"].items() if c and c[0]),
+                key=lambda cn: -s["cat"][cn][0],
             )
-            return (f'<tr><td>{name}</td><td>{ds or "-"}</td><td>{mode}</td>'
+            tags = "".join(
+                _tag(cn, round(s["cat"][cn][1] / s["cat"][cn][0] * 100, 1))
+                for cn in cats[:8]
+            )
+            if len(cats) > 8:
+                tags += f'<span class="muted" style="font-size:11px">+{len(cats)-8}</span>'
+            return (f'<tr><td class="wrap">{name}</td><td>{ds or "-"}</td><td>{mode}</td>'
                     f'<td class="num" style="font-weight:650">{acc}%</td>'
-                    f'<td class="num">{s["c"]}/{s["t"]}</td><td>{tags}</td>'
+                    f'<td class="num">{s["c"]}/{s["t"]}</td><td class="wrap">{tags}</td>'
                     f'<td class="num">{avg_tok}</td>'
                     f'<td class="num">{lat}</td><td class="num">{tps}</td></tr>')
 
@@ -529,20 +536,22 @@ def _render_benchmark_page(config: Config) -> str:
 
   <div class="panel">
     <h2 data-i18n="results_title">评测结果</h2>
+    <div class="table-scroll">
     <table>
       <thead><tr>
-        <th data-i18n="model">模型</th>
+        <th class="wrap" data-i18n="model">模型</th>
         <th data-i18n="dataset">数据集</th>
         <th data-i18n="mode">模式</th>
         <th class="num" data-i18n="accuracy">准确率</th>
         <th class="num" data-i18n="correct_total">正确/总数</th>
-        <th data-i18n="category">分项</th>
+        <th class="wrap" data-i18n="category">分项</th>
         <th class="num" data-i18n="avg_tok">平均输出 tokens</th>
         <th class="num" data-i18n="avg_lat">平均耗时 ms</th>
         <th class="num" data-i18n="avg_tps">吞吐 tok/s</th>
       </tr></thead>
       <tbody id="resultsBody">{rows or '<tr><td colspan="9" class="empty" data-i18n="empty">暂无数据</td></tr>'}</tbody>
     </table>
+    </div>
   </div>
 </main>
 <style>
