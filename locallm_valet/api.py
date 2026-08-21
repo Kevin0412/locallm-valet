@@ -37,12 +37,14 @@ from .benchmark.job import current_job, start_job, pause_job, resume_job, stop_j
 logger = logging.getLogger(__name__)
 
 
-def build_manager(config: Config) -> ModelManager:
-    """Wire the real memory monitor + backend runner into a manager."""
+def build_manager(config: Config):
+    """Wire the pool monitor + per-slot backend runners into a SlotManager.
 
-    memory = MemoryMonitor(config.memory.device)
-    runner = BackendRunner(config.backend, device=config.memory.device)
-    return ModelManager(config, memory, runner)
+    Every slot owns a ModelManager with its own backend port and state
+    machine; shared resource pools gate starts globally.
+    """
+    from .slot_manager import SlotManager
+    return SlotManager(config)
 
 
 def create_app(
@@ -177,40 +179,45 @@ def create_app(
             except Exception:  # noqa: BLE001 - recording never breaks proxying
                 logger.exception("usage recording failed for %s", model_name)
 
-        await manager.ensure_loaded(model_name)
-        manager.request_started()
+        await manager.admit_request(model_name)
+        slot_mgr = manager.get_slot_manager(model_name)
+        base_url = manager.base_url_for(model_name)
         if is_stream:
             # proxy.stream owns the finish callback: it fires on send failure
             # or when the SSE stream is fully consumed / closed by the client.
             return await proxy.stream(
                 request.method, request.url.path, request.headers, body,
-                on_finished=manager.request_finished,
+                on_finished=slot_mgr.request_finished,
                 on_usage=record_usage if recorder is not None else None,
+                base_url=base_url,
             )
         try:
-            resp = await proxy.plain(request.method, request.url.path, request.headers, body)
+            resp = await proxy.plain(request.method, request.url.path, request.headers, body,
+                                     base_url=base_url)
             record_usage(extract_usage_from_json(resp.body), resp.status_code)
             return resp
         finally:
-            manager.request_finished()
+            slot_mgr.request_finished()
 
     # ------------------------------------------------------------- /v1
 
     @app.get("/v1/models")
     async def list_models():
         data = []
+        model_status = {m["name"]: m for m in manager.models_status()}
         for name, spec in manager.cfg.models.items():
-            loaded = manager.state is State.RUNNING and manager.current_model == name
+            ms = model_status.get(name, {})
             data.append(
                 {
                     "id": name,
                     "object": "model",
                     "created": 0,
                     "owned_by": "locallm-valet",
+                    "slot": ms.get("slot", spec.slot),
                     # Declared context (from --context-length) vs the real KV
                     # capacity probed at load time (unknown until loaded).
                     "context_length": spec.configured_context_length(),
-                    "max_context_tokens": manager.max_context_tokens if loaded else None,
+                    "max_context_tokens": ms.get("max_context_tokens") if ms.get("loaded") else None,
                 }
             )
         return {"object": "list", "data": data}
@@ -220,26 +227,30 @@ def create_app(
         query = request.url.query
         path_and_query = request.url.path + (f"?{query}" if query else "")
         if request.method == "GET":
-            # No model field in a GET; only forward when something is loaded.
-            if manager.state is State.RUNNING:
-                started = time.monotonic()
-                manager.request_started()
-                try:
-                    resp = await proxy.plain("GET", path_and_query, request.headers, b"")
-                    if recorder is not None:
-                        try:
-                            recorder.record(
-                                model=manager.current_model or "",
-                                endpoint=request.url.path,
-                                stream=False,
-                                status=resp.status_code,
-                                duration_ms=(time.monotonic() - started) * 1000.0,
-                            )
-                        except Exception:  # noqa: BLE001
-                            logger.exception("usage recording failed for GET %s", request.url.path)
-                    return resp
-                finally:
-                    manager.request_finished()
+            # No model field in a GET; forward to the first slot with a loaded
+            # model (multi-slot: any RUNNING slot works for backend-side GETs).
+            for slot_mgr in manager.slots.values():
+                if slot_mgr.state is State.RUNNING and slot_mgr.current_model:
+                    started = time.monotonic()
+                    slot_mgr.request_started()
+                    base_url = f"http://{config.backend.host}:{slot_mgr.runner.cfg.port}"
+                    try:
+                        resp = await proxy.plain("GET", path_and_query, request.headers, b"",
+                                                 base_url=base_url)
+                        if recorder is not None:
+                            try:
+                                recorder.record(
+                                    model=slot_mgr.current_model or "",
+                                    endpoint=request.url.path,
+                                    stream=False,
+                                    status=resp.status_code,
+                                    duration_ms=(time.monotonic() - started) * 1000.0,
+                                )
+                            except Exception:  # noqa: BLE001
+                                logger.exception("usage recording failed for GET %s", request.url.path)
+                        return resp
+                    finally:
+                        slot_mgr.request_finished()
             raise BackendUnavailable("no model loaded; POST with a 'model' field to load one")
 
         body = await request.body()
@@ -260,34 +271,32 @@ def create_app(
     @app.get("/gateway/models")
     async def gateway_models():
         return {
-            "state": manager.state.value,
-            "model": manager.current_model,
+            "slots": {name: {"state": m.state.value, "model": m.current_model}
+                      for name, m in manager.slots.items()},
             "models": manager.models_status(),
         }
 
     @app.post("/gateway/stop")
     async def gateway_stop():
-        """正常关闭：空闲时（任意状态）接受并清显存；正在服务时 503。"""
-        await manager.stop(reason="manual")
-        return {"state": manager.state.value, "model": manager.current_model}
+        """正常关闭所有槽：空闲时（任意状态）接受并清资源；正在服务时 503。"""
+        result = await manager.stop(reason="manual")
+        return {"slots": result}
 
     @app.post("/gateway/force-stop")
     async def gateway_force_stop():
-        """强制关闭：无条件清显存，即使有活跃请求（会切断流式连接）。"""
-        await manager.stop(reason="manual (forced)", force=True)
-        return {
-            "state": manager.state.value,
-            "model": manager.current_model,
-            "active_requests": manager.active_requests,
-        }
+        """强制关闭所有槽：无条件清资源，即使有活跃请求（会切断流式连接）。"""
+        result = await manager.stop(reason="manual (forced)", force=True)
+        return {"slots": result}
 
     @app.post("/gateway/preload/{model_name}")
     async def gateway_preload(model_name: str):
-        await manager.ensure_loaded(model_name)
+        slot_mgr = manager.get_slot_manager(model_name)
+        await slot_mgr.ensure_loaded(model_name)
         return {
-            "state": manager.state.value,
-            "model": manager.current_model,
-            "active_requests": manager.active_requests,
+            "slot": slot_mgr.slot_name,
+            "state": slot_mgr.state.value,
+            "model": slot_mgr.current_model,
+            "active_requests": slot_mgr.active_requests,
         }
 
     # ------------------------------------------------------ usage / dashboard
@@ -347,13 +356,20 @@ def create_app(
             models = payload.get("models")
             if not isinstance(models, list) or not models:
                 raise InvalidRequest("'models' must be a non-empty list of model names")
+            # Forward the caller's API key (Bearer token) so the job's requests
+            # stay authenticated when the valet has auth enabled.
+            auth = request.headers.get("authorization", "")
+            api_key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
             job = start_job(
                 dataset=dataset,
                 models=[str(m) for m in models],
                 base_url=f"http://127.0.0.1:{config.server.port}/v1",
+                api_key=api_key,
                 max_tokens=int(payload.get("max_tokens", 256)),
                 sample=payload.get("sample"),
                 concurrency=int(payload.get("concurrency", 1)),
+                enable_thinking=bool(payload.get("enable_thinking", False)),
+                slot_of={m: config.models[m].slot for m in models if m in config.models},
             )
             return job.status()
 
@@ -394,23 +410,33 @@ def _render_benchmark_page(config: Config) -> str:
     datasets = list_datasets()
     job = current_job().status()
 
-    # Aggregate scored JSONL by (dataset, model_name) — one table per dataset,
-    # so mmlu (500) / mmlu_pro (500) / smoke (6) are never merged into a
-    # misleading "1006 题" figure with mixed category distributions.
+    # Aggregate scored JSONL by (dataset, model) — one table per dataset, so
+    # mmlu (500) / mmlu_pro (500) / smoke (6) are never merged into a
+    # misleading combined figure. Filenames are {model}_{dataset}_results.jsonl
+    # (new) or {model}_results.jsonl (legacy); the dataset is whatever remains
+    # after stripping the record's own model_name (model names contain
+    # underscores, e.g. Qwen3-1.7B-Q4_K_M, so strip-by-prefix is reliable).
     tables = ""
     results_dir = Path("benchmark_results")
     if results_dir.is_dir():
         from collections import OrderedDict
         by_ds: dict = OrderedDict()
         for f in sorted(results_dir.glob("*_results.jsonl")):
-            ds = f.name.removesuffix("_results.jsonl")
+            stem = f.stem[:-len("_results")]  # drop trailing _results
             for line in f.read_text("utf-8").strip().splitlines():
                 if not line:
                     continue
                 r = json.loads(line)
                 m = r.get("model_name", "?")
+                ds = ""
+                if m and stem.startswith(m):
+                    rest = stem[len(m):]
+                    ds = rest.lstrip("_") if rest else ""
+                elif "_" in stem:
+                    ds = stem.rsplit("_", 1)[-1]
                 s = by_ds.setdefault(ds, {}).setdefault(
-                    m, {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]), "lat": [], "tps": []}
+                    m, {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]),
+                        "lat": [], "tps": [], "tok": [], "thinking": None}
                 )
                 s["t"] += 1
                 if r.get("is_correct") is True:
@@ -423,6 +449,11 @@ def _render_benchmark_page(config: Config) -> str:
                     s["lat"].append(r["latency_ms"])
                 if r.get("tps"):
                     s["tps"].append(r["tps"])
+                if r.get("completion_tokens"):
+                    s["tok"].append(r["completion_tokens"])
+                th = r.get("thinking")
+                if th is not None:
+                    s["thinking"] = bool(th)
 
         def _tag(cn: str, pct: float) -> str:
             cls = "ok" if pct >= 60 else ("warn" if pct >= 30 else "err")
@@ -432,13 +463,24 @@ def _render_benchmark_page(config: Config) -> str:
             acc = round(s["c"] / s["t"] * 100, 1) if s["t"] else 0
             lat = round(sum(s["lat"]) / len(s["lat"]), 1) if s["lat"] else "-"
             tps = round(sum(s["tps"]) / len(s["tps"]), 2) if s["tps"] else "-"
-            tags = "".join(
-                _tag(cn, round(c[1] / c[0] * 100, 1))
-                for cn in ("fact", "reasoning", "math", "chinese", "instruction", "coding")
-                if (c := s["cat"].get(cn)) and c[0]
+            avg_tok = round(sum(s["tok"]) / len(s["tok"]), 0) if s["tok"] else "-"
+            mode = "thinking" if s["thinking"] else "non-thinking" if s["thinking"] is not None else "-"
+            # Real subjects/categories (MMLU has 57) — show the largest few,
+            # keep the rest as a +N count so the cell doesn't explode.
+            cats = sorted(
+                (cn for cn, c in s["cat"].items() if c and c[0]),
+                key=lambda cn: -s["cat"][cn][0],
             )
-            return (f'<tr><td>{name}</td><td class="num" style="font-weight:650">{acc}%</td>'
-                    f'<td class="num">{s["c"]}/{s["t"]}</td><td>{tags}</td>'
+            tags = "".join(
+                _tag(cn, round(s["cat"][cn][1] / s["cat"][cn][0] * 100, 1))
+                for cn in cats[:8]
+            )
+            if len(cats) > 8:
+                tags += f'<span class="muted" style="font-size:11px">+{len(cats)-8}</span>'
+            return (f'<tr><td class="wrap">{name}</td><td>{mode}</td>'
+                    f'<td class="num" style="font-weight:650">{acc}%</td>'
+                    f'<td class="num">{s["c"]}/{s["t"]}</td><td class="wrap">{tags}</td>'
+                    f'<td class="num">{avg_tok}</td>'
                     f'<td class="num">{lat}</td><td class="num">{tps}</td></tr>')
 
         def _table(ds: str, ms: dict) -> str:
@@ -448,22 +490,41 @@ def _render_benchmark_page(config: Config) -> str:
                 _row(name, s)
                 for name, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
             )
-            empty = '<tr><td colspan="6" class="empty">暂无数据</td></tr>'
+            empty = '<tr><td colspan="8" class="empty">暂无数据</td></tr>'
             head = ("<thead><tr>"
-                    '<th data-i18n="model">模型</th><th class="num" data-i18n="accuracy">准确率</th>'
-                    '<th class="num" data-i18n="correct_total">正确/总数</th><th data-i18n="category">分项</th>'
-                    '<th class="num" data-i18n="avg_lat">平均耗时 ms</th><th class="num" data-i18n="avg_tps">吞吐 tok/s</th>'
+                    '<th data-i18n="model">模型</th><th data-i18n="mode">模式</th>'
+                    '<th class="num" data-i18n="accuracy">准确率</th>'
+                    '<th class="num" data-i18n="correct_total">正确/总数</th>'
+                    '<th data-i18n="category">分项</th>'
+                    '<th class="num" data-i18n="avg_tok">平均输出 tokens</th>'
+                    '<th class="num" data-i18n="avg_lat">平均耗时 ms</th>'
+                    '<th class="num" data-i18n="avg_tps">吞吐 tok/s</th>'
                     "</tr></thead>")
             label = f"{per_model} 题 × {n_models} 模型" if per_model else "暂无数据"
             return (
-                f'<h3 style="margin:18px 0 6px;font-size:15px">{ds} '
+                f'<h3 style="margin:18px 0 6px;font-size:15px">{ds or "(unknown)"} '
                 f'<span class="muted" style="font-size:12px">({label})</span></h3>'
-                f'<table>{head}<tbody>{body_rows or empty}</tbody></table>'
+                f'<div class="table-scroll"><table>{head}<tbody>{body_rows or empty}</tbody></table></div>'
             )
 
         tables = "".join(_table(ds, ms) for ds, ms in by_ds.items())
 
-    model_opts = "".join(f'<option value="{m}">{m}</option>' for m in models)
+    # Group models by slot for a friendlier selector
+    from collections import defaultdict as _dd
+    slot_models: dict = _dd(list)
+    for m in models:
+        slot_models[config.models[m].slot].append(m)
+
+    slot_blocks = []
+    for slot_name in sorted(slot_models):
+        opts = "".join(
+            f'<label class="bm-model" title="{slot_name}"><input type="checkbox" name="bmModel" value="{m}">{m}</label>'
+            for m in slot_models[slot_name]
+        )
+        slot_blocks.append(
+            f'<div class="bm-slot"><div class="bm-slot-name">{slot_name}</div><div class="bm-slot-models">{opts}</div></div>'
+        )
+    model_picker = "".join(slot_blocks)
     dataset_opts = "".join(f'<option value="{d}"{" selected" if d == "mmlu" else ""}>{d}</option>' for d in datasets)
 
     body = f"""
@@ -479,16 +540,19 @@ def _render_benchmark_page(config: Config) -> str:
              title="采样条数，0/空 = 全量；有 sample_N_indices.json 时用固定抽样">
       <input type="number" id="concSel" min="1" max="32" value="1" style="width:70px"
              title="并发/批大小：llama.cpp 单槽用 1；SGLang/vLLM 等支持并发的后端可调高（如 4-8）">
-      <select id="modelSel" multiple size="4" style="min-width:240px">
-        {model_opts}
+      <select id="thinkSel" title="思考模式：non-thinking 快但能力低；thinking 慢但完整（Qwen3 系区别明显）">
+        <option value="false" selected data-i18n="non_thinking">non-thinking</option>
+        <option value="true" data-i18n="thinking">thinking</option>
       </select>
-      <span class="muted" data-i18n="model_hint" style="font-size:12px">Ctrl/Shift 多选，留空 = 全部模型</span>
       <span class="spacer"></span>
+      <button id="selectAllBtn" class="icon-btn" data-i18n="select_all">全选</button>
+      <button id="selectNoneBtn" class="icon-btn" data-i18n="select_none">清空</button>
       <button id="runBtn" class="primary" data-i18n="start">开始</button>
       <button id="pauseBtn" data-i18n="pause">暂停</button>
       <button id="resumeBtn" data-i18n="resume" disabled>继续</button>
       <button id="stopBtn" class="danger" data-i18n="stop" disabled>停止</button>
     </div>
+    <div class="bm-picker">{model_picker}</div>
     <div class="progress" id="progWrap" style="display:none"><i id="progBar"></i></div>
     <div id="progText" class="muted" style="font-size:12px;margin-top:6px"></div>
     <div id="jobErr" class="err-text" style="margin-top:6px"></div>
@@ -498,7 +562,18 @@ def _render_benchmark_page(config: Config) -> str:
     <h2 data-i18n="results_title">评测结果</h2>
     {tables or '<p class="empty" data-i18n="empty">暂无数据</p>'}
   </div>
+  </div>
 </main>
+<style>
+.bm-picker {{ display:flex; flex-direction:column; gap:6px; margin-top:12px; }}
+.bm-slot {{ display:flex; align-items:flex-start; gap:10px; }}
+.bm-slot-name {{ min-width:70px; font-size:12px; color:var(--fg-3); padding-top:3px; }}
+.bm-slot-models {{ display:flex; flex-wrap:wrap; gap:6px; }}
+.bm-model {{ display:inline-flex; align-items:center; gap:5px; background:var(--bg-soft);
+  border:1px solid var(--border-soft); border-radius:6px; padding:4px 9px; font-size:12px; cursor:pointer; }}
+.bm-model:hover {{ border-color:var(--accent); }}
+.bm-model input {{ accent-color: var(--accent); }}
+</style>
 """
     return page("模型评测", "Benchmark", active="benchmark", body=body,
                 extra_js=_benchmark_js())
@@ -507,6 +582,11 @@ def _render_benchmark_page(config: Config) -> str:
 def _benchmark_js() -> str:
     return r"""
 let jobTimer = null;
+
+function stopPolling() {
+  if (jobTimer) { clearInterval(jobTimer); jobTimer = null; }
+}
+
 async function refreshJob() {
   try {
     const r = await authedFetch('/gateway/benchmark/status');
@@ -526,21 +606,21 @@ async function refreshJob() {
       bar.style.width = '100%';
       txt.textContent = j.state.toUpperCase() + (j.error ? ' · ' + j.error : '');
       runBtn.disabled = false; pauseBtn.disabled = true; resumeBtn.disabled = true; stopBtn.disabled = true;
-      if (j.state === 'done' || j.state === 'stopped') { location.reload(); }
-      clearInterval(jobTimer); jobTimer = null;
+      stopPolling();
     }
   } catch (e) {}
 }
 
 async function runBench() {
-  const sel = $('modelSel');
-  const models = [...sel.selectedOptions].map(o => o.value);
-  if (!models.length) models.push(...[...sel.options].map(o => o.value));
+  const boxes = document.querySelectorAll('input[name="bmModel"]:checked');
+  const models = [...boxes].map(b => b.value);
+  if (!models.length) models.push(...document.querySelectorAll('input[name="bmModel"]')).map(b => b.value);
   const payload = {
     dataset: $('dsSel').value,
     models,
     sample: parseInt($('sampleSel').value, 10) || null,
-    concurrency: parseInt($('concSel').value, 10) || 4,
+    concurrency: parseInt($('concSel').value, 10) || 1,
+    enable_thinking: $('thinkSel').value === 'true',
   };
   const r = await authedFetch('/gateway/benchmark/run', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -552,16 +632,34 @@ async function runBench() {
     return;
   }
   $('jobErr').textContent = '';
+  stopPolling();
   refreshJob();
   jobTimer = setInterval(refreshJob, 2000);
 }
 
+function setAllModels(checked) {
+  document.querySelectorAll('input[name="bmModel"]').forEach(b => b.checked = checked);
+}
+$('selectAllBtn').onclick = () => setAllModels(true);
+$('selectNoneBtn').onclick = () => setAllModels(false);
 $('runBtn').onclick = runBench;
 $('pauseBtn').onclick = async () => { await authedFetch('/gateway/benchmark/pause', { method: 'POST' }); refreshJob(); };
 $('resumeBtn').onclick = async () => { await authedFetch('/gateway/benchmark/resume', { method: 'POST' }); refreshJob(); };
 $('stopBtn').onclick = async () => { await authedFetch('/gateway/benchmark/stop', { method: 'POST' }); refreshJob(); };
-refreshJob();
-jobTimer = setInterval(refreshJob, 3000);
+
+// Poll only while a job is actually running — an idle page must not spam
+// /gateway/benchmark/status every few seconds.
+(async function init() {
+  try {
+    const j = await (await authedFetch('/gateway/benchmark/status')).json();
+    if (j.state === 'running' || j.state === 'paused') {
+      refreshJob();
+      jobTimer = setInterval(refreshJob, 2000);
+    } else {
+      refreshJob();  // renders the terminal state once, then stays quiet
+    }
+  } catch (e) {}
+})();
 """
 
 

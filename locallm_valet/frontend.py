@@ -87,10 +87,14 @@ main { max-width: 1180px; margin: 0 auto; padding: 22px; }
 .panel > h2 { font-size: 13px; font-weight: 650; color: var(--fg-2); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 14px; }
 
 /* tables */
+.table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border-soft); white-space: nowrap; }
+/* long cells (model names, category tags, ground truth) wrap instead of
+   blowing the table box; numeric cells stay nowrap */
+td.wrap, th.wrap { white-space: normal; word-break: break-word; }
 th { color: var(--fg-3); font-weight: 600; font-size: 12px; }
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 tbody tr:hover { background: var(--bg-soft); }
 .empty { color: var(--fg-3); text-align: center; padding: 22px 0; }
 
@@ -108,7 +112,10 @@ tbody tr:hover { background: var(--bg-soft); }
 .trend .col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 3px; min-width: 0; height: 100%; }
 .trend .bar2 { width: 72%; background: linear-gradient(180deg, var(--accent), transparent 140%); border-radius: 3px 3px 0 0; min-height: 2px; }
 .trend .lbl { font-size: 10px; color: var(--fg-3); }
-.trend .col.empty-bar { opacity: .22; }
+/* zero-data slots keep a faint but VISIBLE baseline so the timeline reads
+   as continuous instead of disconnected gaps */
+.trend .col.empty-bar { opacity: 1; }
+.trend .col.empty-bar .bar2 { background: var(--panel-2); border: 1px dashed var(--border); min-height: 14px; }
 
 /* progress */
 .progress { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin: 8px 0 4px; }
@@ -137,7 +144,10 @@ const T = {
     start: '开始', pause: '暂停', resume: '继续', stop: '停止',
     results_title: '评测结果', accuracy: '准确率', correct_total: '正确/总数',
     category: '分项', avg_lat: '平均耗时 ms', avg_tps: '吞吐 tok/s',
-    running: '运行中', paused: '已暂停',
+    running: '运行中', paused: '已暂停', select_all: '全选', select_none: '清空',
+    slots_title: '设备槽位', pools_title: '资源池',
+    thinking: '思考', non_thinking: '不思考', mode: '模式', avg_tok: '平均输出 tokens',
+    dataset: '数据集',
   },
   en: {
     dashboard: 'Dashboard', benchmark: 'Benchmark', theme_dark: 'Dark', theme_light: 'Light',
@@ -152,7 +162,10 @@ const T = {
     start: 'Start', pause: 'Pause', resume: 'Resume', stop: 'Stop',
     results_title: 'Results', accuracy: 'Accuracy', correct_total: 'Correct/Total',
     category: 'Breakdown', avg_lat: 'Avg Latency ms', avg_tps: 'Throughput tok/s',
-    running: 'Running', paused: 'Paused',
+    running: 'Running', paused: 'Paused', select_all: 'Select All', select_none: 'Clear',
+    slots_title: 'Device Slots', pools_title: 'Resource Pools',
+    thinking: 'Thinking', non_thinking: 'Non-thinking', mode: 'Mode', avg_tok: 'Avg output tokens',
+    dataset: 'Dataset',
   },
 };
 const i18n = key => (T[lang()] && T[lang()][key]) || key;

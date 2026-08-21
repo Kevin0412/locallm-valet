@@ -138,3 +138,107 @@ class MemoryMonitor:
                 logger.warning("VRAM did not fully settle after %.0fs; proceeding with %.1f GiB free",
                                timeout_seconds, cur)
                 return
+
+
+# ---------------------------------------------------------------------------
+# Multi-pool memory monitor (slots architecture)
+# ---------------------------------------------------------------------------
+
+class PoolMonitor:
+    """Probes named resource pools (system_ram / gpu0_vram / npu0_hbm / …).
+
+    Pool kinds:
+    - "ram":    system RAM via psutil (shared by all ram-consuming slots)
+    - "vram":   NVML VRAM at a device index (skip gating when no driver)
+    - "static": no standard API (NPU/HBM/etc.) — configured capacity
+
+    This replaces the single-device MemoryMonitor for the slots architecture:
+    every slot's memory gate is expressed against pools, and shared pools
+    (system_ram) are naturally accounted across all running slots.
+    """
+
+    def __init__(self, pools: dict):
+        from .config import PoolConfig
+        self.pools: dict[str, PoolConfig] = dict(pools)
+        self._nvml = None
+        self._nvml_failed = False
+        self._handles: dict[int, object] = {}
+
+    # ---------------------------------------------------------- probing
+
+    def _nvml_ready(self) -> bool:
+        if self._nvml is not None:
+            return True
+        if self._nvml_failed:
+            return False
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            self._nvml = pynvml
+            return True
+        except Exception:  # noqa: BLE001
+            self._nvml_failed = True
+            logger.warning("NVML unavailable; vram pools are not gated")
+            return False
+
+    def _handle(self, index: int):
+        if index not in self._handles:
+            if not self._nvml_ready():
+                return None
+            try:
+                self._handles[index] = self._nvml.nvmlDeviceGetHandleByIndex(index)
+            except Exception:  # noqa: BLE001
+                logger.warning("NVML device %d not found; its vram pool is not gated", index)
+                self._handles[index] = None
+        return self._handles.get(index)
+
+    def pool_total_gib(self, name: str) -> float:
+        pool = self.pools.get(name)
+        if pool is None:
+            return 0.0
+        if pool.kind == "ram":
+            import psutil
+            return psutil.virtual_memory().total / GIB
+        if pool.kind == "vram":
+            handle = self._handle(pool.device_index)
+            if handle is None:
+                return 0.0
+            return self._nvml.nvmlDeviceGetMemoryInfo(handle).total / GIB
+        return pool.total_gib  # static
+
+    def pool_available_gib(self, name: str) -> float:
+        pool = self.pools.get(name)
+        if pool is None:
+            return 0.0
+        if pool.kind == "ram":
+            import psutil
+            return psutil.virtual_memory().available / GIB
+        if pool.kind == "vram":
+            handle = self._handle(pool.device_index)
+            if handle is None:
+                return 0.0
+            return self._nvml.nvmlDeviceGetMemoryInfo(handle).free / GIB
+        return pool.total_gib  # static: no runtime probe
+
+    def pool_probeable(self, name: str) -> bool:
+        """False when the pool cannot be read (e.g. vram without NVML) — the
+        gate is then skipped rather than hard-failing, matching single-slot
+        behaviour."""
+        pool = self.pools.get(name)
+        if pool is None:
+            return False
+        if pool.kind == "ram":
+            return True
+        if pool.kind == "vram":
+            return self._handle(pool.device_index) is not None
+        return pool.total_gib > 0  # static
+
+    def status(self) -> dict:
+        out = {}
+        for name in self.pools:
+            out[name] = {
+                "total_gib": round(self.pool_total_gib(name), 2),
+                "available_gib": round(self.pool_available_gib(name), 2),
+                "probeable": self.pool_probeable(name),
+            }
+        return out

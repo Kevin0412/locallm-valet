@@ -71,10 +71,15 @@ def _cache_dir() -> Path:
 
 
 def _load_processed(name: str, sample: int | None = None) -> tuple[list[dict], Optional[dict]]:
-    """Load processed.json (+ dev_examples.json if present) from cache.
+    """Load processed.json (FULL data) + dev_examples.json if present.
 
-    ``sample``: when set, apply the fixed ``sample_<N>_indices.json`` subset
-    written by ``benchmark download`` (fallback: first N rows).
+    ``sample``: when set, apply the fixed ``sample_{sample}_indices.json``
+    subset written by ``benchmark download`` (reproducible). When no fixed
+    indices file exists, fall back to a STRATIFIED random sample by
+    subject/category (seed 42). ``None`` = full dataset.
+
+    IMPORTANT: processed.json always holds the FULL dataset — sampling is
+    purely an index into it, so a later ``sample=None`` run uses everything.
     """
     cache = _cache_dir()
     p = cache / name / "processed.json"
@@ -87,24 +92,71 @@ def _load_processed(name: str, sample: int | None = None) -> tuple[list[dict], O
     with open(p, "r", encoding="utf-8") as f:
         items: list[dict] = json.load(f)
 
-    if sample is not None and sample > 0 and sample < len(items):
+    if sample is not None and 0 < sample < len(items):
+        # 1) fixed indices shipped / written by `benchmark download`
+        #    (already stratified by the upstream generator where available)
         idx_p = cache / name / f"sample_{sample}_indices.json"
         if idx_p.is_file():
             with open(idx_p, "r", encoding="utf-8") as f:
                 indices: list[int] = json.load(f)
             indices = [i for i in indices if 0 <= i < len(items)]
-            items = [items[i] for i in indices]
-        else:
-            items = items[:sample]
+            if indices:
+                items = [items[i] for i in indices]
+                logger.info("Sampled %d items via %s", len(items), idx_p.name)
+                _write_sample_indices(cache / name, sample, indices)
+                return _finish_load(name, items)
 
+        # 2) no fixed indices → stratified random sample by subject/category
+        items = _stratified_sample(items, sample)
+        logger.info("Stratified-sampled %d items (seed=42, by subject/category)", len(items))
+
+    return _finish_load(name, items)
+
+
+def _finish_load(name: str, items: list[dict]) -> tuple[list[dict], Optional[dict]]:
     dev: Optional[dict] = None
-    dev_p = cache / name / "dev_examples.json"
+    dev_p = _cache_dir() / name / "dev_examples.json"
     if dev_p.is_file():
         with open(dev_p, "r", encoding="utf-8") as f:
             dev = json.load(f)
-
-    logger.info("Loaded %d items from %s", len(items), p)
+    logger.info("Loaded %d items from %s", len(items), name)
     return items, dev
+
+
+def _stratified_sample(items: list[dict], n: int) -> list[dict]:
+    """Proportional stratified sample by subject (MMLU) or category.
+
+    Keeps the distribution of subjects/categories the same as the full set,
+    instead of a flat random draw which can over/under-represent a subject.
+    """
+    import collections
+    random.seed(42)
+    key_of = lambda r: r.get("subject") or r.get("category") or "other"
+    groups: dict[str, list[int]] = collections.defaultdict(list)
+    for i, r in enumerate(items):
+        groups[key_of(r)].append(i)
+
+    chosen: list[int] = []
+    total = len(items)
+    # round-robin across groups so every group contributes, weighted by size
+    for g, idxs in groups.items():
+        share = max(1, round(n * len(idxs) / total))
+        chosen.extend(random.sample(idxs, min(share, len(idxs))))
+    # top up / trim to exactly n, keeping the stratified distribution close
+    random.shuffle(chosen)
+    return [items[i] for i in chosen[:n]]
+
+
+def _write_sample_indices(cache_dir, sample: int, indices: list[int]) -> None:
+    """Persist the sample indices for reproducibility."""
+    try:
+        out = cache_dir / f"sample_{sample}_indices.json"
+        if not out.is_file():
+            with open(out, "w", encoding="utf-8") as f:
+                json.dump(indices, f)
+            logger.info("wrote %s", out)
+    except Exception:  # noqa: BLE001 - cache write is best-effort
+        logger.warning("could not persist sample indices for %s", sample)
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +213,9 @@ def _from_hf_raw(items_raw: list[dict], dev: Optional[dict]) -> list[BenchmarkIt
         lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in prompt) else "en"
         out.append(BenchmarkItem(
             item_id=row.get("item_id", f"{subject}_{i}"),
-            category=row.get("category", "fact"),
+            # MMLU's real grouping is the subject; use it as the category so
+            # per-category stats reflect actual subjects, not a fake "fact".
+            category=subject if subject else row.get("category", "fact"),
             question=prompt,
             ground_truth=answer_letter,
             choices=[f"A. {choices[0]}", f"B. {choices[1]}",
@@ -174,14 +228,33 @@ def _from_hf_raw(items_raw: list[dict], dev: Optional[dict]) -> list[BenchmarkIt
 def _from_ref_converted(items_raw: list[dict]) -> list[BenchmarkItem]:
     out = []
     for row in items_raw:
-        # Build question text from messages if available
-        msgs = row.get("messages")
-        if msgs:
-            question_text = "\n".join(m["content"] for m in msgs if m.get("content"))
-        else:
-            question_text = row.get("question", row.get("description", ""))
-        gt = row["ground_truth"]
+        msgs = row.get("messages") or []
+        system = ""
+        user_parts: list[str] = []
+        for m in msgs:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if role == "system":
+                system = content
+            elif role == "user":
+                user_parts.append(content)
+            elif role == "assistant" and "fewshot" in content.lower():
+                # keep few-shot assistant turns? they belong to the prompt;
+                # simplest: ignore (the messages already include them for
+                # upstream-faithful runs — see below)
+                pass
+        # Rebuild the user turn with the answer options inline if present,
+        # matching the original "A. .. B. .." layout the scorer expects.
         choices_raw = row.get("options", [])
+        if choices_raw and user_parts:
+            user_parts[-1] = user_parts[-1] + "\n\n" + "\n".join(
+                f"{chr(ord('A')+i)}. {opt}" for i, opt in enumerate(choices_raw)
+            )
+        elif not user_parts:
+            user_parts.append(row.get("question", row.get("description", "")))
+        question_text = "\n".join(user_parts)
+
+        gt = row["ground_truth"]
         choices = [f"{chr(ord('A')+i)}. {opt}" for i, opt in enumerate(choices_raw)]
 
         # Some datasets (e.g. MMLU-Pro) store the question and its options
@@ -199,10 +272,13 @@ def _from_ref_converted(items_raw: list[dict]) -> list[BenchmarkItem]:
             prompt = question_text
 
         lang = "zh" if any("\u4e00" <= c <= "\u9fff" for c in prompt) else "en"
+        # Keep the real subject/category (MMLU subject, MMLU-Pro category) so
+        # per-category statistics actually mean something.
+        category = (row.get("category") or row.get("subject") or "fact")
         out.append(BenchmarkItem(
-            item_id=row["item_id"], category=row.get("category", "fact"),
+            item_id=row["item_id"], category=category,
             question=prompt, ground_truth=gt,
-            choices=choices, language=lang,
+            choices=choices, system=system, language=lang,
         ))
     return out
 
@@ -239,17 +315,156 @@ def _get_mmlu_pro(sample: int | None = None) -> list[BenchmarkItem]:
     items_raw, dev = _load_processed("mmlu_pro", sample)
     return _convert(items_raw, dev)
 
-def _get_bfcl(sample: int | None = None) -> list[BenchmarkItem]:
-    items_raw, dev = _load_processed("bfcl", sample)
-    return _convert(items_raw, dev)
-
 def _get_mmstar(sample: int | None = None) -> list[BenchmarkItem]:
+    logger.warning(
+        "MMStar is a VISION benchmark; the text-only runner cannot evaluate it "
+        "meaningfully — results will be garbage. Use a multimodal backend."
+    )
     items_raw, dev = _load_processed("mmstar", sample)
     return _convert(items_raw, dev)
 
 def _get_ocrbench(sample: int | None = None) -> list[BenchmarkItem]:
+    logger.warning(
+        "OCRBench is a VISION/OCR benchmark; the text-only runner cannot "
+        "evaluate it meaningfully — results will be garbage. Use a multimodal "
+        "backend."
+    )
     items_raw, dev = _load_processed("ocrbench", sample)
     return _convert(items_raw, dev)
+
+
+def _get_bfcl(sample: int | None = None) -> list[BenchmarkItem]:
+    """BFCL function-calling items: keep the tool schemas + expected calls in
+    meta so the runner can pass tools and the scorer can compare calls."""
+    items_raw, _ = _load_processed("bfcl", sample)
+    out = []
+    for row in items_raw:
+        system = ""
+        user_parts = []
+        for m in (row.get("messages") or []):
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if role == "system":
+                system = content
+            elif role == "user":
+                user_parts.append(content)
+        question_text = "\n".join(user_parts) or row.get("item_id", "")
+        out.append(BenchmarkItem(
+            item_id=row["item_id"],
+            category=str(row.get("category", "bfcl")),
+            question=question_text,
+            ground_truth=_encode_expected(row.get("expected_tool_calls") or []),
+            system=system,
+            meta={
+                "tools": row.get("tools") or [],
+                "expected_tool_calls": row.get("expected_tool_calls") or [],
+            },
+        ))
+    return out
+
+
+def _encode_expected(expected: list) -> str:
+    """Human-readable ground truth for reports."""
+    parts = []
+    for e in expected:
+        fn = e.get("function") or e
+        parts.append(fn.get("name", "?"))
+    return ", ".join(parts) if parts else "(no call)"
+
+
+# ---------------------------------------------------------------------------
+# Code benchmarks (HumanEval / MBPP) — downloaded from GitHub, cached locally.
+# ---------------------------------------------------------------------------
+
+_CODE_CACHE = _cache_dir() / "code"
+
+
+def _github_get(url: str) -> bytes:
+    """Fetch a raw GitHub file, honouring the proxy from proxy.txt if set.
+    Caches the raw bytes under dataset_cache/code/."""
+    import hashlib
+    _CODE_CACHE.mkdir(parents=True, exist_ok=True)
+    cache_f = _CODE_CACHE / hashlib.sha1(url.encode()).hexdigest()
+    if cache_f.is_file():
+        return cache_f.read_bytes()
+
+    import os
+    import httpx
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("http_proxy")
+    try:
+        r = httpx.get(url, timeout=90, proxy=proxy)
+        r.raise_for_status()
+    except Exception:
+        # no proxy configured → try direct; Windows boxes often need the proxy
+        r = httpx.get(url, timeout=90)
+        r.raise_for_status()
+    cache_f.write_bytes(r.content)
+    return r.content
+
+
+def _load_humaneval(sample: int | None = None) -> list[BenchmarkItem]:
+    """HumanEval (openai, 164 tasks): generate the function body; scored by
+    executing the hidden test with the generated candidate (pass@1)."""
+    import gzip
+    raw = _github_get(
+        "https://raw.githubusercontent.com/openai/human-eval/master/data/HumanEval.jsonl.gz"
+    )
+    rows = [json.loads(l) for l in gzip.decompress(raw).decode("utf-8").splitlines()]
+
+    if sample is not None and 0 < sample < len(rows):
+        random.seed(42)
+        rows = random.sample(rows, sample)
+
+    items = []
+    for row in rows:
+        prompt = row["prompt"].rstrip()
+        items.append(BenchmarkItem(
+            item_id=row["task_id"],
+            category="coding",
+            question=(
+                f"Complete the following Python function. Return ONLY the code, "
+                f"no explanation, no markdown fences.\n\n{prompt}"
+            ),
+            ground_truth=row.get("canonical_solution", ""),
+            meta={
+                "prompt": row["prompt"],
+                "entry_point": row["entry_point"],
+                "test": row["test"],
+            },
+        ))
+    logger.info("Loaded %d HumanEval items", len(items))
+    return items
+
+
+def _load_mbpp(sample: int | None = None) -> list[BenchmarkItem]:
+    """MBPP (google, 974 tasks): implement a described function; scored by
+    executing the provided assert list against the generated solution."""
+    raw = _github_get(
+        "https://raw.githubusercontent.com/google-research/google-research/master/mbpp/mbpp.jsonl"
+    )
+    rows = [json.loads(l) for l in raw.decode("utf-8").splitlines()]
+
+    if sample is not None and 0 < sample < len(rows):
+        random.seed(42)
+        rows = random.sample(rows, sample)
+
+    items = []
+    for row in rows:
+        items.append(BenchmarkItem(
+            item_id=f"MBPP_{row['task_id']}",
+            category="coding",
+            question=(
+                f"Write a Python function that satisfies: {row['text']}\n"
+                f"Return ONLY the code, no explanation, no markdown fences."
+            ),
+            ground_truth=row.get("code", ""),
+            meta={
+                "test_setup": row.get("test_setup_code", ""),
+                "test_list": row.get("test_list", []),
+            },
+        ))
+    logger.info("Loaded %d MBPP items", len(items))
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +478,8 @@ _DATASETS: dict[str, callable] = {
     "bfcl": _get_bfcl,
     "mmstar": _get_mmstar,
     "ocrbench": _get_ocrbench,
+    "humaneval": _load_humaneval,
+    "mbpp": _load_mbpp,
 }
 
 

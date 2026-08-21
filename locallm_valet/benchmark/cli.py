@@ -42,6 +42,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help=f"Dataset name (default: mmlu). Available: {', '.join(list_datasets())}")
     run_p.add_argument("--sample", type=int, default=None,
                        help="Sample N items (uses sample_N_indices.json when available; default: full).")
+    run_p.add_argument("--thinking", action="store_true",
+                       help="Enable thinking mode (Qwen3 reasoning). Default: non-thinking (fast).")
     run_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL (default: http://127.0.0.1:8000/v1).")
     run_p.add_argument("--output-dir", default="benchmark_results",
@@ -69,6 +71,8 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                        help=f"Dataset name (default: mmlu).")
     cmp_p.add_argument("--sample", type=int, default=None,
                        help="Sample N items.")
+    cmp_p.add_argument("--thinking", action="store_true",
+                       help="Enable thinking mode (Qwen3 reasoning). Default: non-thinking.")
     cmp_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
                        help="Valet OpenAI-compatible base URL.")
     cmp_p.add_argument("--output-dir", default="benchmark_results",
@@ -106,6 +110,10 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                             "max_concurrency when declared (default 4).")
     all_p.add_argument("--retries", type=int, default=2,
                        help="Extra attempts per item on timeout/5xx (default: 2).")
+    all_p.add_argument("--thinking", action="store_true",
+                       help="Enable thinking mode (Qwen3 reasoning). Default: non-thinking (fast).")
+    all_p.add_argument("--api-key", default=None,
+                       help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
     # -- download --
     dl_p = bench_sub.add_parser("download",
@@ -118,11 +126,19 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                       help="Cache root (default: LOCALLM_VALET_DATASET_CACHE or ./dataset_cache/dataset).")
     dl_p.add_argument("--mirror", default="hf",
                       help="Source: hf (default) | hf-mirror | tuna (needs LOCALLM_VALET_HF_ENDPOINT) | modelscope")
-    all_p.add_argument("--api-key", default=None,
-                       help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
 
     # -- list-datasets --
     bench_sub.add_parser("list-datasets", help="Show available datasets")
+
+    # -- probe --
+    probe_p = bench_sub.add_parser("probe", help="Speed probe: TTFT / prefill / decode / cold start / concurrency")
+    probe_p.add_argument("--model", required=True, help="Model registry name.")
+    probe_p.add_argument("--base-url", default="http://127.0.0.1:8000/v1",
+                         help="Valet OpenAI-compatible base URL.")
+    probe_p.add_argument("--no-cold-start", action="store_true",
+                         help="Skip the cold-start (first request incl. load) probe.")
+    probe_p.add_argument("--output-dir", default="benchmark_results",
+                         help="Directory for the probe JSONL.")
 
 
 def _resolve_api_key(args: argparse.Namespace) -> str:
@@ -183,6 +199,24 @@ def main(args: argparse.Namespace) -> int:
 
     api_key = _resolve_api_key(args)
 
+    if args.bench_cmd == "probe":
+        from .probe import probe_speed, probe_to_jsonl
+        from pathlib import Path
+        print(f"Speed probe: {args.model} @ {args.base_url}")
+        result = probe_speed(
+            model_name=args.model,
+            base_url=args.base_url,
+            include_cold_start=not args.no_cold_start,
+        )
+        import json
+        print(json.dumps(result["metrics"], ensure_ascii=False, indent=2))
+        out = Path(args.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{args.model}_speed_probe.jsonl"
+        probe_to_jsonl(result, str(path))
+        print(f"\nProbe saved to: {path}")
+        return 0
+
     if args.bench_cmd == "list-datasets":
         print("Available datasets:")
         for name in list_datasets():
@@ -236,6 +270,7 @@ def main(args: argparse.Namespace) -> int:
             timeout_s=args.timeout,
             concurrency=concurrency,
             retries=args.retries,
+            enable_thinking=getattr(args, "thinking", False),
         )
         out_path = render_report(
             results=results,
@@ -281,6 +316,7 @@ def main(args: argparse.Namespace) -> int:
                 timeout_s=args.timeout,
                 concurrency=concurrency,
                 retries=args.retries,
+                enable_thinking=getattr(args, "thinking", False),
             )
             all_results.extend(results)
         out_path = render_report(
@@ -312,6 +348,7 @@ def main(args: argparse.Namespace) -> int:
                 timeout_s=args.timeout,
                 concurrency=concurrency,
                 retries=args.retries,
+                enable_thinking=getattr(args, "thinking", False),
             )
             all_results.extend(results)
         out_path = render_report(

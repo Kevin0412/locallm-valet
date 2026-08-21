@@ -26,15 +26,13 @@ DASHBOARD_HTML = page(
       <option value="0" data-i18n="all">全部</option>
     </select>
     <select id="modelSel"><option value="" data-i18n="all_models">全部模型</option></select>
-    <select id="groupSel">
-      <option value="hour" selected data-i18n="by_hour">按小时</option>
-      <option value="day" data-i18n="by_day">按天</option>
-    </select>
     <button id="refreshBtn" class="icon-btn" data-i18n="refresh">刷新</button>
     <span id="refreshAt" class="muted"></span>
   </div>
 
   <div class="cards" id="cards"></div>
+
+  <div id="slotsPanel"></div>
 
   <div class="panel">
     <h2 data-i18n="trend_title">输出趋势</h2>
@@ -43,9 +41,10 @@ DASHBOARD_HTML = page(
 
   <div class="panel">
     <h2 data-i18n="by_model_title">按模型</h2>
+    <div class="table-scroll">
     <table id="modelTable">
       <thead><tr>
-        <th data-i18n="model">模型</th>
+        <th class="wrap" data-i18n="model">模型</th>
         <th class="num" data-i18n="requests">请求数</th>
         <th class="num" data-i18n="in_tokens">输入 tokens</th>
         <th class="num" data-i18n="out_tokens">输出 tokens</th>
@@ -54,18 +53,21 @@ DASHBOARD_HTML = page(
       </tr></thead>
       <tbody></tbody>
     </table>
+    </div>
   </div>
 
   <div class="panel">
     <h2 data-i18n="recent_title">最近请求</h2>
+    <div class="table-scroll">
     <table id="recentTable">
       <thead><tr>
-        <th data-i18n="time">时间</th><th data-i18n="model">模型</th><th data-i18n="endpoint">接口</th>
+        <th data-i18n="time">时间</th><th class="wrap" data-i18n="model">模型</th><th data-i18n="endpoint">接口</th>
         <th class="num" data-i18n="status">状态</th><th class="num" data-i18n="in_tokens">输入</th>
         <th class="num" data-i18n="out_tokens">输出</th><th class="num" data-i18n="duration">耗时 ms</th>
       </tr></thead>
       <tbody></tbody>
     </table>
+    </div>
   </div>
 </main>
 <style>
@@ -85,10 +87,52 @@ async function loadModels() {
       sel.appendChild(opt);
     }
     const s = await (await authedFetch('/gateway/status')).json();
+    // Multi-slot: aggregate running slots; pools shown in the slots panel.
+    const slots = s.slots || {};
+    const running = Object.entries(slots).filter(([, v]) => v.state === 'running');
     const chip = $('stateChip');
-    chip.textContent = s.state + (s.model ? ' · ' + s.model : '');
-    chip.className = 'tag ' + (s.state === 'running' ? 'ok' : '');
+    if (running.length) {
+      chip.textContent = running.map(([n, v]) => n + ':' + v.model).join('  ');
+      chip.className = 'tag ok';
+    } else {
+      chip.textContent = 'stopped';
+      chip.className = 'tag';
+    }
+    renderSlots(s);
   } catch (e) {}
+}
+
+function renderSlots(s) {
+  const slots = s.slots || {};
+  const pools = s.pools || {};
+  const wrap = $('slotsPanel');
+  if (!wrap) return;
+  let rows = '';
+  for (const [name, v] of Object.entries(slots)) {
+    const state = v.state === 'running' ? 'ok' : '';
+    rows += `<tr><td>${name}</td>
+      <td><span class="tag ${state}">${v.state}</span></td>
+      <td>${v.model || '—'}</td>
+      <td class="num">${fmt(v.active_requests)}</td>
+      <td class="num">${v.max_context_tokens ? fmt(v.max_context_tokens) : '—'}</td></tr>`;
+  }
+  let poolRows = '';
+  for (const [name, p] of Object.entries(pools)) {
+    const pct = p.total_gib > 0 ? (100 * (1 - p.available_gib / p.total_gib)).toFixed(0) : 0;
+    poolRows += `<tr><td>${name}${p.probeable ? '' : ' (未探测)'}</td>
+      <td class="num">${p.available_gib} / ${p.total_gib} GiB</td>
+      <td><div class="bar-wrap"><div class="bar-bg"><div class="bar" style="width:${pct}%"></div></div>
+      <span class="muted">${pct}%</span></div></td></tr>`;
+  }
+  wrap.innerHTML = rows
+    ? `<div class="panel"><h2 data-i18n="slots_title">设备槽位</h2><div class="table-scroll"><table>
+         <thead><tr><th>Slot</th><th data-i18n="status">状态</th><th class="wrap" data-i18n="model">模型</th>
+         <th class="num" data-i18n="requests">请求数</th><th class="num">Ctx</th></tr></thead>
+         <tbody>${rows}</tbody></table></div></div>
+       <div class="panel"><h2 data-i18n="pools_title">资源池</h2><div class="table-scroll"><table>
+         <thead><tr><th>Pool</th><th class="num">可用/总量</th><th>占用</th></tr></thead>
+         <tbody>${poolRows}</tbody></table></div></div>`
+    : '<div class="panel"><h2 data-i18n="slots_title">设备槽位</h2><p class="empty">—</p></div>';
 }
 
 function pct(a, b) { return b > 0 ? (100 * a / b).toFixed(1) + '%' : '0%'; }
@@ -105,7 +149,10 @@ function render(data) {
     `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`
   ).join('');
 
-  // continuous trend
+  // continuous trend — granularity follows the range automatically:
+  // 24h (and 1h) → hourly; 7d / 30d / all → daily. No manual switch.
+  const range = parseInt($('rangeSel').value, 10);
+  const groupBy = (range === 0 || range > 86400) ? 'day' : 'hour';
   const series = data.series || [];
   const trend = $('trend');
   if (!series.length) {
@@ -114,7 +161,7 @@ function render(data) {
     const first = new Date(series[0].bucket_epoch * 1000);
     const last = new Date(series[series.length - 1].bucket_epoch * 1000);
     const buckets = [];
-    if ($('groupSel').value === 'hour') {
+    if (groupBy === 'hour') {
       const start = new Date(first); start.setMinutes(0, 0, 0);
       const end = new Date(last); end.setMinutes(0, 0, 0);
       for (let t = new Date(start); t <= end; t.setHours(t.getHours() + 1)) buckets.push(t.getTime() / 1000);
@@ -129,14 +176,17 @@ function render(data) {
     const max = Math.max(...all.map(x => x.completion_tokens), 1);
     const pad = n => String(n).padStart(2, '0');
     trend.innerHTML = all.map(x => {
-      const h = Math.max(3, Math.round(100 * x.completion_tokens / max));
       const t = new Date(x.bucket_epoch * 1000);
-      const lbl = $('groupSel').value === 'hour'
+      const lbl = groupBy === 'hour'
         ? pad(t.getHours()) + ':00'
         : (t.getMonth() + 1) + '-' + pad(t.getDate());
       const title = lbl + ' · out ' + fmt(x.completion_tokens) + ' / in ' + fmt(x.prompt_tokens) + ' / ' + fmt(x.requests) + ' req';
-      const cls = x.requests > 0 ? 'col' : 'col empty-bar';
-      return `<div class="${cls}" title="${title}"><span class="bar2" style="height:${h}%"></span><span class="lbl">${lbl}</span></div>`;
+      if (x.requests > 0) {
+        const h = Math.max(6, Math.round(100 * x.completion_tokens / max));
+        return `<div class="col" title="${title}"><span class="bar2" style="height:${h}%"></span><span class="lbl">${lbl}</span></div>`;
+      }
+      // zero-data slot: fixed faint baseline keeps the timeline continuous
+      return `<div class="col empty-bar" title="${title}"><span class="bar2" style="height:14px"></span><span class="lbl">${lbl}</span></div>`;
     }).join('');
   }
 
@@ -158,10 +208,12 @@ function render(data) {
 async function load() {
   const range = parseInt($('rangeSel').value, 10);
   const since = range > 0 ? Math.floor(Date.now() / 1000) - range : '';
+  // granularity follows the range: 24h (and 1h) hourly, 7d/30d/all daily
+  const groupBy = (range === 0 || range > 86400) ? 'day' : 'hour';
   const q = new URLSearchParams();
   if (since) q.set('since', since);
   if ($('modelSel').value) q.set('model', $('modelSel').value);
-  q.set('group_by', $('groupSel').value);
+  q.set('group_by', groupBy);
   q.set('limit', '50');
   try {
     const r = await authedFetch('/gateway/usage?' + q.toString());
@@ -176,7 +228,6 @@ async function load() {
 $('refreshBtn').onclick = load;
 $('rangeSel').onchange = load;
 $('modelSel').onchange = load;
-$('groupSel').onchange = load;
 setInterval(load, 15000);
 loadModels();
 load();

@@ -27,8 +27,15 @@ class BenchmarkItem:
     """Expected answer string. For multiple choice this is the letter (A/B/C/D)."""
     choices: list[str] = field(default_factory=list)
     """Multiple-choice options if applicable, e.g. ["A. Paris", "B. London", …]."""
+    system: str = ""
+    """Optional system prompt (e.g. MMLU-Pro's CoT instruction). Sent as the
+    first chat message; empty = no system message."""
     language: str = "en"
     """Question language: en / zh."""
+    meta: dict = field(default_factory=dict)
+    """Extra per-item data for specialised scorers, e.g.
+    {"entry_point": "has_close_elements", "test": "def check(candidate): ..."}
+    for code-execution benchmarks (HumanEval / MBPP)."""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -54,12 +61,24 @@ class BenchmarkResult:
     """Whether extracted answer matches ground_truth."""
     score_detail: str = ""
     """Verbose explanation from the scorer (e.g. 'matched letter B')."""
+    thinking: bool = False
+    """Whether this request ran in thinking mode (reasoning on)."""
     ttft_ms: Optional[float] = None
-    """Time to first token in milliseconds (if measurable)."""
+    """Time to first token in milliseconds (backend timings when available)."""
+    decode_ms: Optional[float] = None
+    """Decode (generation) duration in milliseconds (backend timings)."""
     tps: Optional[float] = None
     """Tokens per second generation throughput."""
     latency_ms: Optional[float] = None
     """Total request round-trip time in milliseconds."""
+    prompt_tokens: Optional[int] = None
+    """Input token count from usage."""
+    completion_tokens: Optional[int] = None
+    """Output token count from usage (includes reasoning tokens when thinking)."""
+    reasoning_tokens: int = 0
+    """Length of the reasoning_content snippet (proxy for reasoning usage)."""
+    tool_calls: Optional[list] = None
+    """Tool calls emitted by the model (BFCL): [{id, type, function:{name, arguments}}]."""
 
     def to_dict(self) -> dict:
         return {
@@ -69,13 +88,19 @@ class BenchmarkResult:
             "choices": self.item.choices,
             "ground_truth": self.item.ground_truth,
             "model_name": self.model_name,
+            "thinking": self.thinking,
             "raw_response": self.raw_response,
             "extracted_answer": self.extracted_answer,
             "is_correct": self.is_correct,
             "score_detail": self.score_detail,
             "ttft_ms": self.ttft_ms,
+            "decode_ms": self.decode_ms,
             "tps": self.tps,
             "latency_ms": self.latency_ms,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "tool_calls": self.tool_calls,
         }
 
 

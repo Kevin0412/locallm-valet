@@ -22,6 +22,14 @@ def score_result(result: BenchmarkResult) -> None:
     - Instruction following: exact match (case-insensitive for text)
     - Coding: keyword or exact answer
     """
+    cat = result.item.category
+
+    # BFCL function calling: compare model tool_calls to expected. Runs BEFORE
+    # the empty-text check — a valid BFCL answer is a tool_call with no text.
+    if cat == "bfcl" or (result.item.meta and "expected_tool_calls" in result.item.meta):
+        _score_bfcl(result)
+        return
+
     text = (result.raw_response or "").strip()
     gt = result.item.ground_truth.strip()
 
@@ -30,7 +38,13 @@ def score_result(result: BenchmarkResult) -> None:
         result.score_detail = "empty response"
         return
 
-    cat = result.item.category
+    # Code benchmarks (HumanEval / MBPP): execute the generated code against
+    # the hidden tests in an isolated subprocess — pass@1 style.
+    # NOTE: pass the RAW response (not .strip()'d) — the first line of a
+    # function body is indented and must keep its whitespace.
+    if cat == "coding" and result.item.meta:
+        _score_code(result.raw_response or "", result)
+        return
 
     # Route to appropriate scorer based on whether the item has choices (MCQ) or not
     if result.item.choices:
@@ -208,3 +222,153 @@ def _score_exact(text: str, gt: str, result: BenchmarkResult) -> None:
     result.extracted_answer = text.strip()[:120]
     result.is_correct = (text.strip().lower() == gt.strip().lower())
     result.score_detail = f"exact match: '{text.strip()[:50]}' vs '{gt}'"
+
+
+# ---------------------------------------------------------------------------
+# Code execution scorer (HumanEval / MBPP) — pass@1 via subprocess
+# ---------------------------------------------------------------------------
+
+def _score_code(text: str, result: BenchmarkResult) -> None:
+    """Run the model-generated code against the item's hidden tests in an
+    isolated subprocess. pass@1: the single generated attempt must pass all
+    tests. Never eval() in-process — the model output is untrusted."""
+    import subprocess
+    import sys
+    import textwrap
+
+    meta = result.item.meta
+    generated = _extract_code(text)
+
+    if not generated:
+        result.is_correct = False
+        result.score_detail = "no code block found in response"
+        return
+
+    try:
+        if "entry_point" in meta:  # HumanEval
+            entry = meta["entry_point"]
+            # The model may return the full function (with its own `def` +
+            # imports) or only the body. If it already defines the entry
+            # point, use the model's code as-is; otherwise prepend the prompt
+            # (which contains the def header) to the generated body.
+            if re.search(rf"^\s*def\s+{re.escape(entry)}\s*\(", generated, re.MULTILINE):
+                full = generated
+            else:
+                full = meta["prompt"] + "\n" + generated
+            test_code = meta["test"].replace("candidate", entry)
+            harness = f"{full}\n\n{test_code}\n\ncheck({entry})"
+        else:  # MBPP: generated solution + assert list
+            setup = meta.get("test_setup", "") or ""
+            asserts = "\n".join(meta.get("test_list", []))
+            harness = f"{setup}\n\n{generated}\n\n{asserts}"
+
+        proc = subprocess.run(
+            [sys.executable, "-c", harness],
+            capture_output=True, text=True, timeout=20,
+        )
+        if proc.returncode == 0:
+            result.is_correct = True
+            result.score_detail = "all tests passed"
+        else:
+            result.is_correct = False
+            tail = (proc.stderr or "").strip().splitlines()
+            result.score_detail = "tests failed: " + (tail[-1][:160] if tail else "rc!=0")
+    except subprocess.TimeoutExpired:
+        result.is_correct = False
+        result.score_detail = "test execution timed out (>20s)"
+    except Exception as exc:  # noqa: BLE001
+        result.is_correct = False
+        result.score_detail = f"harness error: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# BFCL function-calling scorer (name + argument match)
+# ---------------------------------------------------------------------------
+
+def _score_bfcl(result: BenchmarkResult) -> None:
+    """Score a BFCL item: the model must emit the expected function call(s).
+
+    Compares the emitted tool_calls against ``expected_tool_calls`` in the
+    item's meta. This is a name + JSON-argument equality check — the core of
+    what BFCL measures (can the model *call the right tool with the right
+    arguments*), without a full AST-normalised argument comparison.
+
+    ``irrelevance`` category: the model must NOT call any tool.
+    """
+    import json as _json
+
+    expected = result.item.meta.get("expected_tool_calls") or []
+    emitted = result.tool_calls or []
+
+    # Normalise expected: [{"name": ..., "arguments": {...}}] or
+    # [{"function": {"name": ..., "arguments": ...}}]
+    def _norm(entry: dict) -> dict | None:
+        fn = entry.get("function") or entry
+        name = fn.get("name") or entry.get("name")
+        args = fn.get("arguments") or entry.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = _json.loads(args)
+            except Exception:
+                args = {}
+        return {"name": name, "arguments": args} if name else None
+
+    exp_norm = [n for n in (_norm(e) for e in expected) if n]
+    emt_norm = []
+    for e in emitted:
+        n = _norm(e)
+        if n:
+            emt_norm.append(n)
+
+    cat = result.item.category or ""
+
+    if cat == "irrelevance":
+        result.is_correct = (len(emt_norm) == 0)
+        result.score_detail = (
+            f"expected no calls, model made {len(emt_norm)}"
+            if emt_norm else "correctly made no calls"
+        )
+        return
+
+    if not exp_norm:
+        result.is_correct = False
+        result.score_detail = "no expected_tool_calls in item meta"
+        return
+
+    # Exact sequence match on (name, arguments)
+    if len(emt_norm) != len(exp_norm):
+        result.is_correct = False
+        result.score_detail = (
+            f"call count mismatch: expected {len(exp_norm)}, got {len(emt_norm)}"
+        )
+        return
+    for got, want in zip(emt_norm, exp_norm):
+        if got["name"] != want["name"]:
+            result.is_correct = False
+            result.score_detail = f"name mismatch: expected {want['name']!r}, got {got['name']!r}"
+            return
+        if got["arguments"] != want["arguments"]:
+            result.is_correct = False
+            result.score_detail = (
+                f"arguments mismatch for {want['name']}: "
+                f"expected {want['arguments']}, got {got['arguments']}"
+            )
+            return
+    result.is_correct = True
+    result.score_detail = "tool call(s) matched"
+
+
+def _extract_code(text: str) -> str:
+    """Extract Python code from the model response.
+
+    - Markdown fences (```python ... ```) → inner code.
+    - Otherwise the response is used as-is (stripped of leading/trailing
+      blank lines only, NEVER leading whitespace): for HumanEval the model
+      returns the function BODY whose first line is indented (the prompt
+      already contains ``def ...:``).
+    """
+    import re
+    m = re.search(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip("\n")
+    return text.strip("\n")
