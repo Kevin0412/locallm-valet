@@ -365,6 +365,36 @@ def main(args: argparse.Namespace) -> int:
             if stats:
                 logger.info("single-request throughput %s: prefill=%.0f decode=%.0f tok/s",
                             model_name, stats["prefill_tps"], stats["decode_tps"])
+        # Merge records previously saved by per-model persistence (other
+        # models from earlier runs) so render_report's JSONL write does NOT
+        # overwrite and lose them (e.g. resuming one model later).
+        try:
+            from .schema import BenchmarkItem, BenchmarkResult
+            from pathlib import Path
+            p = Path(args.output_dir) / f"{args.dataset}_results.jsonl"
+            if p.is_file():
+                seen = {(r.model_name, r.item.item_id) for r in all_results}
+                for line in p.read_text("utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    rec = json.loads(line)
+                    if (rec["model_name"], rec["item_id"]) in seen:
+                        continue
+                    item = BenchmarkItem(item_id=rec["item_id"], category=rec["category"],
+                                         question=rec["question"], ground_truth=rec["ground_truth"],
+                                         choices=rec.get("choices", []), language=rec.get("language", "en"))
+                    all_results.append(BenchmarkResult(
+                        item=item, model_name=rec["model_name"],
+                        raw_response=rec.get("raw_response", ""),
+                        extracted_answer=rec.get("extracted_answer"),
+                        is_correct=rec.get("is_correct"),
+                        score_detail=rec.get("score_detail", ""),
+                        thinking=rec.get("thinking", False),
+                        reasoning_tokens=rec.get("reasoning_tokens", 0),
+                        ttft_ms=rec.get("ttft_ms"), tps=rec.get("tps"),
+                        latency_ms=rec.get("latency_ms")))
+        except Exception as exc:  # noqa: BLE001 - merge is best-effort
+            logger.warning("merge of prior partial results failed: %s", exc)
         out_path = render_report(
             results=all_results,
             dataset_name=args.dataset,
