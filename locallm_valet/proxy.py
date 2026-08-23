@@ -118,12 +118,15 @@ class Proxy:
         try:
             upstream = await self._send(method, path_and_query, headers, body, stream=True,
                                         base_url=base_url)
-        except Exception:
+            headers_out = self._response_headers(upstream.headers)
+            status_code = upstream.status_code
+        except BaseException:
+            # ``except Exception`` would miss CancelledError (a BaseException)
+            # when the client disconnects while we await the upstream; the
+            # request was already admitted, so the slot must always be freed.
             on_finished()
             raise
 
-        headers_out = self._response_headers(upstream.headers)
-        status_code = upstream.status_code
         scanner = SseUsageScanner() if on_usage is not None else None
 
         async def gen():
@@ -133,13 +136,24 @@ class Proxy:
                         scanner.feed(chunk)
                     yield chunk
             finally:
-                if scanner is not None:
+                # ``on_finished`` must run no matter how the stream ends —
+                # including client disconnect, which cancels this generator:
+                # inside an already-cancelled coroutine any further ``await``
+                # (e.g. ``upstream.aclose()``) re-raises CancelledError, so a
+                # naive ``await aclose(); on_finished()`` would skip the
+                # callback and leak ``active_requests`` forever (a stale count
+                # then blocks ``/gateway/stop`` with model_switch_busy).
+                try:
+                    if scanner is not None:
+                        try:
+                            on_usage(scanner.finish(), status_code)
+                        except Exception:  # noqa: BLE001 - recording must not break streaming
+                            logger.exception("usage capture callback failed")
+                finally:
                     try:
-                        on_usage(scanner.finish(), status_code)
-                    except Exception:  # noqa: BLE001 - recording must not break streaming
-                        logger.exception("usage capture callback failed")
-                await upstream.aclose()
-                on_finished()
+                        await upstream.aclose()
+                    finally:
+                        on_finished()
 
         return StreamingResponse(
             gen(),

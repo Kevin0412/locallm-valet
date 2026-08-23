@@ -409,3 +409,88 @@ async def test_no_key_configured_open_access(stack):
     client, *_ = stack  # make_config has no api_keys
     assert (await client.get("/v1/models")).status_code == 200
     assert (await client.get("/gateway/status")).status_code == 200
+
+
+class _FakeStreamUpstream:
+    """A fake upstream response that streams forever until cancelled."""
+
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def aiter_raw(self):
+        for _ in range(100_000):
+            yield b"data: x\n\n"
+            await asyncio.sleep(0.005)
+
+    async def aclose(self) -> None:
+        # an await inside the body — in a cancelled coroutine this re-raises
+        # CancelledError, which used to skip the on_finished callback
+        self.closed = True
+        await asyncio.sleep(0.005)
+
+
+async def test_stream_client_disconnect_releases_request():
+    """Regression: a client aborting a streaming response mid-way must still
+    release the request slot. Starlette cancels the SSE generator via an
+    anyio CancelScope, whose cancellation re-raises at *every* await point —
+    including the ``await upstream.aclose()`` inside the ``finally`` — so a
+    naive ``await aclose(); on_finished()`` skipped the callback and leaked
+    ``active_requests`` forever (blocking ``/gateway/stop`` with
+    ``model_switch_busy``)."""
+    import anyio
+
+    cfg = make_config()
+    manager = ModelManager(cfg, memory=FakeMemory(), runner=FakeRunner())
+    proxy = Proxy("http://127.0.0.1:30000")
+
+    async def fake_send(method, path_and_query, headers, body, stream=False, base_url=None):
+        return _FakeStreamUpstream()
+
+    proxy._send = fake_send
+
+    manager.request_started()  # simulate admit_request having counted it
+    resp = await proxy.stream(
+        "POST", "/v1/chat/completions", {}, b"",
+        on_finished=manager.request_finished,
+        base_url="http://127.0.0.1:30000",
+    )
+
+    async def drain():
+        async for _ in resp.body_iterator:
+            pass
+
+    with anyio.CancelScope() as scope:
+        task = asyncio.create_task(drain())
+        await asyncio.sleep(0.03)  # let the stream start producing
+        scope.cancel()  # what Starlette does when the client disconnects
+        with pytest.raises(BaseException):
+            await task
+
+    # on_finished must have run despite the mid-stream cancellation
+    assert manager.active_requests == 0
+
+
+async def test_stream_send_failure_releases_request():
+    """A failure (or client disconnect) while awaiting the upstream must
+    release the slot too — including CancelledError, which is a BaseException
+    and used to slip past ``except Exception``."""
+    cfg = make_config()
+    manager = ModelManager(cfg, memory=FakeMemory(), runner=FakeRunner())
+    proxy = Proxy("http://127.0.0.1:30000")
+
+    async def failing_send(method, path_and_query, headers, body, stream=False, base_url=None):
+        raise asyncio.CancelledError()
+
+    proxy._send = failing_send
+
+    manager.request_started()
+    with pytest.raises(asyncio.CancelledError):
+        await proxy.stream(
+            "POST", "/v1/chat/completions", {}, b"",
+            on_finished=manager.request_finished,
+            base_url="http://127.0.0.1:30000",
+        )
+    assert manager.active_requests == 0
