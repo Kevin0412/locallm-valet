@@ -212,6 +212,12 @@ def _persist_model_results(results, dataset: str, output_dir: str) -> None:
             except Exception:  # noqa: BLE001
                 r.is_correct = False
 
+    def _is_failure(rec: dict) -> bool:
+        """A record that never reached the model (HTTP error / timeout /
+        empty response) — it must never clobber a previously-good answer."""
+        raw = str(rec.get("raw_response") or "")
+        return raw.startswith("[HTTP") or raw == "[CANCELLED]" or rec.get("is_correct") is None
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{dataset}_results.jsonl"
@@ -222,9 +228,19 @@ def _persist_model_results(results, dataset: str, output_dir: str) -> None:
         except Exception:  # noqa: BLE001
             existing = []
     # 新的记录覆盖旧的（同一 model+item_id）——不保留陈旧结果（如旧 no-think 数据）
+    # 但失败的记录（HTTP 错误/超时/取消）绝不覆盖已有的有效结果。
     new_map = {(r.model_name, r.item.item_id): r.to_dict() for r in results}
-    merged = [x for x in existing if (x["model_name"], x["item_id"]) not in new_map]
-    merged.extend(new_map.values())
+    merged = [
+        x for x in existing
+        if (x["model_name"], x["item_id"]) not in new_map
+        or _is_failure(new_map[(x["model_name"], x["item_id"])])
+    ]
+    for k, rec in new_map.items():
+        if _is_failure(rec):
+            # 已有有效记录时，失败记录直接丢弃
+            if any(x["model_name"] == k[0] and x["item_id"] == k[1] for x in merged):
+                continue
+        merged.append(rec)
     path.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in merged) + "\n", encoding="utf-8")
     logger.info("partial results saved: %s (%d 条)", path, len(merged))
 

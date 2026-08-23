@@ -56,6 +56,44 @@ def test_persist_new_overwrites_old(tmp_path):
     assert rows[0]["thinking"] is True and rows[0]["is_correct"] is False
 
 
+def test_persist_failure_never_clobbers_good(tmp_path):
+    """Regression: HTTP-error / empty records from a broken run must not
+    overwrite previously-good answers for the same (model, item_id)."""
+    def mk(raw, item_id="q1", model="m", correct=None):
+        it = BenchmarkItem(item_id=item_id, category="fact", question="q", ground_truth="B")
+        r = BenchmarkResult(item=it, model_name=model, raw_response=raw)
+        r.is_correct = correct
+        return [r]
+
+    # good answer first
+    _persist_model_results(mk("B", correct=True), "t", str(tmp_path))
+    # broken rerun: HTTP error for the same item — must not replace it
+    _persist_model_results(mk("[HTTP 500] boom", correct=False), "t", str(tmp_path))
+    rows = [json.loads(l) for l in (tmp_path / "t_results.jsonl").read_text().splitlines() if l.strip()]
+    assert len(rows) == 1
+    assert rows[0]["is_correct"] is True
+    assert "HTTP" not in str(rows[0]["raw_response"])
+
+
+def test_persist_keeps_other_models(tmp_path):
+    """A run for one model must leave other models' rows untouched."""
+    def mk(model, item_id, raw="ok", correct=True):
+        it = BenchmarkItem(item_id=item_id, category="fact", question="q", ground_truth="B")
+        r = BenchmarkResult(item=it, model_name=model, raw_response=raw)
+        r.is_correct = correct
+        return [r]
+
+    _persist_model_results(mk("m-a", "q1") + mk("m-b", "q1"), "t", str(tmp_path))
+    # rerun only m-b with a fresh (different) answer for the same item
+    _persist_model_results(mk("m-b", "q1", raw="C", correct=False), "t", str(tmp_path))
+    rows = [json.loads(l) for l in (tmp_path / "t_results.jsonl").read_text().splitlines() if l.strip()]
+    by = {r["model_name"]: r for r in rows}
+    assert set(by) == {"m-a", "m-b"}
+    assert by["m-a"]["is_correct"] is True          # untouched
+    assert by["m-b"]["is_correct"] is False         # updated
+    assert by["m-b"]["raw_response"] == "C"
+
+
 def test_bfcl_ast_scoring():
     from locallm_valet.benchmark.scorer import score_result
     fn = {"name": "get_time", "parameters": {"type": "object", "properties": {
