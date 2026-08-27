@@ -182,6 +182,17 @@ def _run_one(
         result.prompt_tokens = prompt_tokens
         result.completion_tokens = completion_tokens
         result.reasoning_tokens = usage.get("reasoning_tokens") or len(reasoning_text) or 0
+        # Cache report: SGLang --enable-cache-report and vLLM
+        # --enable-prompt-tokens-details both surface the prompt-cache hit as
+        # usage.prompt_tokens_details.cached_tokens. llama.cpp exposes the
+        # cached share implicitly via timings.prompt_n (handled in _probe_once);
+        # per-request it reports it through prompt_tokens_details too.
+        ptd = usage.get("prompt_tokens_details") or {}
+        if isinstance(ptd, dict):
+            cached = ptd.get("cached_tokens") or 0
+        else:
+            cached = 0
+        result.cached_tokens = int(cached)
         if completion_tokens > 0 and elapsed > 0:
             result.tps = round(completion_tokens / elapsed, 2)
 

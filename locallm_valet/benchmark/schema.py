@@ -77,6 +77,10 @@ class BenchmarkResult:
     """Output token count from usage (includes reasoning tokens when thinking)."""
     reasoning_tokens: int = 0
     """Length of the reasoning_content snippet (proxy for reasoning usage)."""
+    cached_tokens: int = 0
+    """Prompt tokens served from the prefix cache (cache report from
+    SGLang --enable-cache-report / vLLM --enable-prompt-tokens-details /
+    llama.cpp timings). 0 when the backend didn't report it."""
     tool_calls: Optional[list] = None
     """Tool calls emitted by the model (BFCL): [{id, type, function:{name, arguments}}]."""
 
@@ -100,6 +104,7 @@ class BenchmarkResult:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "reasoning_tokens": self.reasoning_tokens,
+            "cached_tokens": self.cached_tokens,
             "tool_calls": self.tool_calls,
         }
 

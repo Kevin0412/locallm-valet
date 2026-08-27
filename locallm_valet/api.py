@@ -462,7 +462,8 @@ def _render_benchmark_page(config: Config) -> str:
                     ds = stem  # plain {dataset}_results.jsonl
                 s = by_ds.setdefault(ds, {}).setdefault(
                     m, {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]),
-                        "lat": [], "tps": [], "tok": [], "reason": [], "thinking": None}
+                        "lat": [], "tps": [], "tok": [], "reason": [], "cached": [],
+                        "thinking": None}
                 )
                 s["t"] += 1
                 if r.get("is_correct") is True:
@@ -479,6 +480,8 @@ def _render_benchmark_page(config: Config) -> str:
                     s["tok"].append(r["completion_tokens"])
                 if r.get("reasoning_tokens"):
                     s["reason"].append(r["reasoning_tokens"])
+                if r.get("cached_tokens") is not None:
+                    s["cached"].append(r["cached_tokens"])
                 th = r.get("thinking")
                 if th is not None:
                     s["thinking"] = bool(th)
@@ -493,6 +496,16 @@ def _render_benchmark_page(config: Config) -> str:
             avg_tok = round(sum(s["tok"]) / len(s["tok"]), 0) if s["tok"] else "-"
             avg_reason = round(sum(s["reason"]) / len(s["reason"]), 0) if s["reason"] else "-"
             mode = "thinking" if s["thinking"] else "non-thinking" if s["thinking"] is not None else "-"
+            # Prompt cache hit: share of cached tokens among reported
+            # prompt_tokens_details.cached_tokens; needs cache-report enabled
+            # on the backend (SGLang --enable-cache-report / vLLM
+            # --enable-prompt-tokens-details / llama.cpp default).
+            cached = s["cached"]
+            if cached and any(c > 0 for c in cached):
+                avg_cached = round(sum(cached) / len(cached), 0)
+                cache_cell = f"{avg_cached:.0f}"
+            else:
+                cache_cell = "-"
             # Real subjects/categories (MMLU has 57) — show the largest few,
             # keep the rest as a +N count so the cell doesn't explode.
             cats = sorted(
@@ -518,6 +531,7 @@ def _render_benchmark_page(config: Config) -> str:
                     f'<td class="num">{s["c"]}/{s["t"]}</td><td class="wrap">{tags}</td>'
                     f'<td class="num">{avg_reason}</td>'
                     f'<td class="num">{avg_tok}</td>'
+                    f'<td class="num">{cache_cell}</td>'
                     f'<td class="num">{lat}</td>'
                     f'<td class="num">{pre_cell}</td><td class="num">{dec_cell}</td></tr>')
 
@@ -528,7 +542,7 @@ def _render_benchmark_page(config: Config) -> str:
                 _row(name, s)
                 for name, s in sorted(ms.items(), key=lambda x: -x[1]["c"] / max(x[1]["t"], 1))
             )
-            empty = '<tr><td colspan="10" class="empty">暂无数据</td></tr>'
+            empty = '<tr><td colspan="11" class="empty">暂无数据</td></tr>'
             head = ("<thead><tr>"
                     '<th data-i18n="model">模型</th><th data-i18n="mode">模式</th>'
                     '<th class="num" data-i18n="accuracy">准确率</th>'
@@ -536,6 +550,7 @@ def _render_benchmark_page(config: Config) -> str:
                     '<th data-i18n="category">分项</th>'
                     '<th class="num" title="平均思考 tokens（thinking 模式下的 reasoning 消耗）">平均思考 tokens</th>'
                     '<th class="num" data-i18n="avg_tok">平均输出 tokens</th>'
+                    '<th class="num" title="平均 prompt 缓存命中 tokens（后端需开 cache report：SGLang --enable-cache-report / vLLM --enable-prompt-tokens-details / llama.cpp 默认）">平均缓存命中</th>'
                     '<th class="num" data-i18n="avg_lat">平均耗时 ms</th>'
                     '<th class="num" title="single-request prefill">prefill tok/s</th>'
                     '<th class="num" title="single-request decode">decode tok/s</th>'
