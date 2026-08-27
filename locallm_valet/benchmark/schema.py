@@ -170,10 +170,43 @@ class BenchmarkReport:
         }
 
     def to_jsonl(self, path: str) -> None:
-        """Write all results to a JSONL file (one JSON object per line)."""
+        """Merge-write all results into a JSONL file (one JSON object per line).
+
+        Unlike a plain overwrite, this preserves rows from *other* models in
+        an existing file: each ``benchmark run`` covers one model, and an
+        overwrite would silently wipe every previously-recorded model for the
+        same dataset (the bug that emptied the results page). Rows for the
+        same (model, item_id) are replaced by the freshest run; failure rows
+        (HTTP errors / empty responses) never clobber a good answer.
+        """
+        import os
+
+        def _is_failure(rec: dict) -> bool:
+            raw = str(rec.get("raw_response") or "")
+            return raw.startswith("[HTTP") or raw == "[CANCELLED]" or rec.get("is_correct") is None
+
+        new_recs = [r.to_dict() for r in self.results]
+        new_map = {(rec["model_name"], rec["item_id"]): rec for rec in new_recs}
+        existing: list[dict] = []
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    existing = [json.loads(l) for l in f if l.strip()]
+            except Exception:  # noqa: BLE001 - never lose new data over a bad read
+                existing = []
+        merged = [
+            x for x in existing
+            if (x["model_name"], x["item_id"]) not in new_map
+            or _is_failure(new_map[(x["model_name"], x["item_id"])])
+        ]
+        for key, rec in new_map.items():
+            if _is_failure(rec):
+                if any(x["model_name"] == key[0] and x["item_id"] == key[1] for x in merged):
+                    continue
+            merged.append(rec)
         with open(path, "w", encoding="utf-8") as f:
-            for r in self.results:
-                f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
+            for rec in merged:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     @classmethod
     def from_jsonl(cls, path: str, dataset_name: str = "") -> BenchmarkReport:

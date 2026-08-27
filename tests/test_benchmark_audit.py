@@ -94,6 +94,38 @@ def test_persist_keeps_other_models(tmp_path):
     assert by["m-b"]["raw_response"] == "C"
 
 
+def test_report_to_jsonl_merges_other_models(tmp_path):
+    """Regression: BenchmarkReport.to_jsonl used to *overwrite* the whole
+    JSONL with only the current run's model, silently wiping every other
+    model's previously-recorded results for the same dataset (the bug that
+    emptied the results page after sequential `benchmark run` invocations).
+    It must merge: keep other models' rows, replace same (model, item_id),
+    and never let HTTP-failure rows clobber a good answer."""
+    from locallm_valet.benchmark.schema import BenchmarkReport
+
+    def mk(model, item_id, correct=True, raw="ok"):
+        it = BenchmarkItem(item_id=item_id, category="fact", question="q", ground_truth="B")
+        r = BenchmarkResult(item=it, model_name=model, raw_response=raw)
+        r.is_correct = correct
+        return r
+
+    def report(*results):
+        return BenchmarkReport(dataset_name="t", timestamp="x", stats=[], results=list(results))
+
+    path = str(tmp_path / "t_results.jsonl")
+    report(mk("m-a", "q1"), mk("m-a", "q2")).to_jsonl(path)      # m-a first
+    report(mk("m-b", "q1"), mk("m-b", "q2")).to_jsonl(path)      # m-b second — must not wipe m-a
+    report(mk("m-b", "q1", correct=False, raw="[HTTP 500] boom")).to_jsonl(path)  # failure — keep good
+    report(mk("m-a", "q1", correct=False)).to_jsonl(path)        # fresh same-model rerun — replaces
+
+    rows = [json.loads(l) for l in (tmp_path / "t_results.jsonl").read_text().splitlines() if l.strip()]
+    by = {(r["model_name"], r["item_id"]): r for r in rows}
+    assert set(by) == {("m-a", "q1"), ("m-a", "q2"), ("m-b", "q1"), ("m-b", "q2")}
+    assert by[("m-a", "q1")]["is_correct"] is False   # fresh rerun wins
+    assert by[("m-b", "q1")]["is_correct"] is True    # failure did not clobber
+    assert "HTTP" not in str(by[("m-b", "q1")]["raw_response"])
+
+
 def test_bfcl_ast_scoring():
     from locallm_valet.benchmark.scorer import score_result
     fn = {"name": "get_time", "parameters": {"type": "object", "properties": {
