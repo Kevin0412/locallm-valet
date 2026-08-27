@@ -625,13 +625,13 @@ def create_app(
 
         @app.post("/gateway/benchmark/pause")
         async def gateway_benchmark_pause(request: Request):
-            job_id = _job_id_from_request(request)
+            job_id = await _job_id_from_request(request)
             job = pause_job(job_id)
             return job.status() if job else {"state": "unknown", "job_id": job_id}
 
         @app.post("/gateway/benchmark/resume")
         async def gateway_benchmark_resume(request: Request):
-            job_id = _job_id_from_request(request)
+            job_id = await _job_id_from_request(request)
             auth = request.headers.get("authorization", "")
             api_key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
             job = resume_job(
@@ -643,7 +643,7 @@ def create_app(
 
         @app.post("/gateway/benchmark/stop")
         async def gateway_benchmark_stop(request: Request):
-            job_id = _job_id_from_request(request)
+            job_id = await _job_id_from_request(request)
             job = stop_job(job_id)
             return job.status() if job else {"state": "unknown", "job_id": job_id}
 
