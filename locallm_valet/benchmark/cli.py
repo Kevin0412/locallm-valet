@@ -131,6 +131,17 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
     # -- list-datasets --
     bench_sub.add_parser("list-datasets", help="Show available datasets")
 
+    # -- backfill --
+    bf_p = bench_sub.add_parser(
+        "backfill",
+        help="Backfill JSONL benchmark results into the SQLite store "
+             "(one-time migration of pre-SQLite data)",
+    )
+    bf_p.add_argument("--results-dir", default="benchmark_results",
+                      help="Directory containing *_results.jsonl (default: benchmark_results).")
+    bf_p.add_argument("--db-path", default=None,
+                      help="SQLite database path (default: data/benchmark.db).")
+
     # -- probe --
     probe_p = bench_sub.add_parser("probe", help="Speed probe: TTFT / prefill / decode / cold start / concurrency")
     probe_p.add_argument("--model", required=True, help="Model registry name.")
@@ -142,6 +153,22 @@ def build_subparser(sub: argparse._SubParsersAction) -> None:
                          help="Directory for the probe JSONL.")
     probe_p.add_argument("--api-key", default=None,
                          help="Valet API key. Defaults to the key in config.yaml (server.api_key).")
+
+
+def _persist_results(results: list, dataset_name: str, db_path: str | None = None) -> None:
+    """Mirror a CLI run's results into the SQLite benchmark store."""
+    if not results:
+        return
+    from .store import BenchmarkStore
+    store = BenchmarkStore(db_path)
+    try:
+        by_model: dict[str, list] = {}
+        for r in results:
+            by_model.setdefault(r.model_name, []).append(r)
+        for model_name, rlist in by_model.items():
+            store.record_results(model_name, dataset_name, rlist, source="cli")
+    finally:
+        store.close()
 
 
 def _resolve_api_key(args: argparse.Namespace) -> str:
@@ -223,6 +250,21 @@ def main(args: argparse.Namespace) -> int:
             print(f"  {name}")
         return 0
 
+    if args.bench_cmd == "backfill":
+        from .store import BenchmarkStore, backfill_jsonl
+        store = BenchmarkStore(args.db_path)
+        try:
+            counts = backfill_jsonl(store, args.results_dir)
+        finally:
+            store.close()
+        if not counts:
+            print("No results files found (or nothing to backfill).")
+            return 0
+        print("Backfilled into SQLite:")
+        for ds, n in sorted(counts.items(), key=lambda x: x[0]):
+            print(f"  {ds:12s} {n} rows")
+        return 0
+
     if args.bench_cmd == "download":
         from pathlib import Path
 
@@ -283,6 +325,7 @@ def main(args: argparse.Namespace) -> int:
             output_dir=args.output_dir,
             report_name=f"benchmark_{args.model}.md",
         )
+        _persist_results(results, args.dataset)
         print(f"\nReport saved to: {out_path}")
         return 0
 
@@ -336,6 +379,7 @@ def main(args: argparse.Namespace) -> int:
             report_name="benchmark_comparison.md",
             compare_labels=models_to_run,
         )
+        _persist_results(all_results, args.dataset)
         print(f"\nComparison report saved to: {out_path}")
         return 0
 
@@ -373,6 +417,7 @@ def main(args: argparse.Namespace) -> int:
             report_name="benchmark_comparison.md",
             compare_labels=args.labels,
         )
+        _persist_results(all_results, args.dataset)
         print(f"\nComparison report saved to: {out_path}")
         return 0
 

@@ -221,12 +221,22 @@ class UsageConfig:
 
 
 @dataclass
+class BenchmarkConfig:
+    # SQLite benchmark result store (see benchmark/store.py).  When enabled,
+    # benchmark results and single-request throughputs are persisted here and
+    # read back by the benchmark page.
+    enabled: bool = True
+    db_path: str = "data/benchmark.db"  # ":memory:" is fine for tests
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     backend: BackendConfig = field(default_factory=BackendConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     idle: IdleConfig = field(default_factory=IdleConfig)
     usage: UsageConfig = field(default_factory=UsageConfig)
+    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
     pools: dict[str, PoolConfig] = field(default_factory=dict)
     slots: dict[str, SlotConfig] = field(default_factory=dict)
     models: dict[str, ModelSpec] = field(default_factory=dict)
@@ -448,6 +458,10 @@ def load_config(path: str | Path | None = None) -> Config:
     usage = _require_mapping(root.get("usage"), "usage", "usage")
     cfg.usage.enabled = bool(usage.get("enabled", cfg.usage.enabled))
     cfg.usage.db_path = str(usage.get("db_path", cfg.usage.db_path))
+
+    benchmark = _require_mapping(root.get("benchmark"), "benchmark", "benchmark")
+    cfg.benchmark.enabled = bool(benchmark.get("enabled", cfg.benchmark.enabled))
+    cfg.benchmark.db_path = str(benchmark.get("db_path", cfg.benchmark.db_path))
 
     # Pools: named memory sources (system_ram, gpu0_vram, ...). When absent,
     # two defaults are implied: "system_ram" (psutil) and "gpu0_vram" (NVML),

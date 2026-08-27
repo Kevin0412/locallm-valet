@@ -239,6 +239,41 @@ class JobControl:
             _t.sleep(0.2)
 
 
+def run_single_item(
+    item: BenchmarkItem,
+    *,
+    model_name: str,
+    base_url: str = "http://127.0.0.1:8000/v1",
+    api_key: str = "",
+    max_tokens: int = 256,
+    temperature: float = 0.0,
+    timeout_s: int = 180,
+    retries: int = 2,
+    save_responses: bool = True,
+    control: JobControl | None = None,
+    enable_thinking: bool = False,
+    extra_headers: dict | None = None,
+) -> BenchmarkResult:
+    """Run a single benchmark item (one request) and return its result.
+
+    This is the per-item building block for the pipelined job scheduler; it
+    wraps :func:`_run_one` so the scheduler drives item claiming/acknowledgement
+    itself instead of handing the whole list to :func:`run_benchmark`.
+    ``extra_headers`` (e.g. the low-priority benchmark marker) are merged in.
+    """
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if extra_headers:
+        headers.update(extra_headers)
+    chat_url = f"{base_url.rstrip('/')}/chat/completions"
+    return _run_one(
+        item, model_name, chat_url, headers, max_tokens, temperature,
+        timeout_s, retries, save_responses, 1, control,
+        enable_thinking=enable_thinking,
+    )
+
+
 def run_benchmark(
     *,
     items: list[BenchmarkItem],

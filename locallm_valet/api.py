@@ -35,7 +35,7 @@ from .proxy import Proxy
 from .runner import BackendRunner
 from .state import State
 from .usage import UsageRecorder, extract_usage_from_json
-from .benchmark.job import current_job, start_job, pause_job, resume_job, stop_job
+from .benchmark.job import current_job, start_job, pause_job, resume_job, stop_job, get_store
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,15 @@ def create_app(
     manager = manager or build_manager(config)
     proxy = proxy or Proxy(config.backend.base_url)
     recorder = recorder or (UsageRecorder(config.usage.db_path) if config.usage.enabled else None)
+
+    # Benchmark SQLite store: point the job pipeline at the configured path so
+    # new results land in the same database the dashboard reads from.
+    if config.benchmark.enabled:
+        from .benchmark.job import configure_store
+        try:
+            configure_store(config.benchmark.db_path)
+        except Exception:  # noqa: BLE001 - benchmark must never block startup
+            logger.exception("failed to configure benchmark store")
 
     # Serializes settings write-back (credentials / API keys / model backend
     # edits all rewrite the same YAML file).
@@ -197,6 +206,12 @@ def create_app(
             raise InvalidRequest("missing or invalid 'model' field in request body")
         started = time.monotonic()
         is_stream = bool(payload.get("stream"))
+        # Benchmark requests are tagged so real (external) traffic can preempt
+        # them: only non-benchmark requests are counted as "external active".
+        is_benchmark = bool(request.headers.get("x-locallm-benchmark"))
+        if not is_benchmark:
+            from .priority import external_started
+            external_started()
         # Only chat/completions speaks the OpenAI stream_options contract;
         # Responses (/v1/responses) and Anthropic (/v1/messages) have their
         # own streaming shape — pass those through verbatim (routing only,
@@ -231,12 +246,22 @@ def create_app(
         await manager.admit_request(model_name)
         slot_mgr = manager.get_slot_manager(model_name)
         base_url = manager.base_url_for(model_name)
+
+        def _finished() -> None:
+            if not is_benchmark:
+                from .priority import external_finished
+                try:
+                    external_finished()
+                except Exception:  # noqa: BLE001
+                    pass
+            slot_mgr.request_finished()
+
         if is_stream:
             # proxy.stream owns the finish callback: it fires on send failure
             # or when the SSE stream is fully consumed / closed by the client.
             return await proxy.stream(
                 request.method, request.url.path, request.headers, body,
-                on_finished=slot_mgr.request_finished,
+                on_finished=_finished,
                 on_usage=record_usage if recorder is not None else None,
                 base_url=base_url,
             )
@@ -246,7 +271,7 @@ def create_app(
             record_usage(extract_usage_from_json(resp.body), resp.status_code)
             return resp
         finally:
-            slot_mgr.request_finished()
+            _finished()
 
     # ------------------------------------------------------------- /v1
 
@@ -548,15 +573,30 @@ def create_app(
             """Benchmark page (bilingual, one-click run / pause / resume)."""
             return HTMLResponse(_render_benchmark_page(config))
 
+        @app.get("/gateway/benchmark/jobs")
+        async def gateway_benchmark_jobs(limit: int = 50):
+            """List persisted benchmark jobs (for resume after a restart)."""
+            return {"jobs": get_store().list_jobs(limit=max(1, min(int(limit), 500)))}
+
         @app.get("/gateway/benchmark/status")
-        async def gateway_benchmark_status():
-            """Read-only progress of the current benchmark job."""
+        async def gateway_benchmark_status(job_id: str = ""):
+            """Progress of one benchmark job (defaults to the most recent)."""
+            if job_id:
+                from .benchmark.job import get_job
+                job = get_job(job_id)
+                if job is not None:
+                    return job.status()
+                row = get_store().get_job(job_id)
+                if row is None:
+                    raise InvalidRequest(f"unknown benchmark job_id {job_id!r}")
+                return _status_from_job_row(row)
             return current_job().status()
 
         @app.post("/gateway/benchmark/run")
         async def gateway_benchmark_run(request: Request):
             """Start a benchmark job: POST {"dataset": "mmlu", "models": [...]}.
-            Drives model inference — auth-gated (see middleware)."""
+            Drives model inference — auth-gated (see middleware). Returns a
+            durable job id that can pause / resume / stop / report progress."""
             body = await request.body()
             try:
                 payload = json.loads(body) if body else {}
@@ -584,16 +624,28 @@ def create_app(
             return job.status()
 
         @app.post("/gateway/benchmark/pause")
-        async def gateway_benchmark_pause():
-            return pause_job().status()
+        async def gateway_benchmark_pause(request: Request):
+            job_id = _job_id_from_request(request)
+            job = pause_job(job_id)
+            return job.status() if job else {"state": "unknown", "job_id": job_id}
 
         @app.post("/gateway/benchmark/resume")
-        async def gateway_benchmark_resume():
-            return resume_job().status()
+        async def gateway_benchmark_resume(request: Request):
+            job_id = _job_id_from_request(request)
+            auth = request.headers.get("authorization", "")
+            api_key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+            job = resume_job(
+                job_id,
+                base_url=f"http://127.0.0.1:{config.server.port}/v1",
+                api_key=api_key,
+            )
+            return job.status() if job else {"state": "unknown", "job_id": job_id}
 
         @app.post("/gateway/benchmark/stop")
-        async def gateway_benchmark_stop():
-            return stop_job().status()
+        async def gateway_benchmark_stop(request: Request):
+            job_id = _job_id_from_request(request)
+            job = stop_job(job_id)
+            return job.status() if job else {"state": "unknown", "job_id": job_id}
 
         @app.get("/gateway/dashboard", response_class=HTMLResponse)
         async def gateway_dashboard():
@@ -605,6 +657,42 @@ def create_app(
 # ---------------------------------------------------------------------------
 # Benchmark page rendering
 # ---------------------------------------------------------------------------
+
+async def _job_id_from_request(request: Request) -> str:
+    """Resolve a job id from ``?job_id=`` or a JSON body field; else the latest."""
+    q = request.query_params.get("job_id")
+    if q:
+        return q
+    try:
+        body = await request.body()
+        payload = json.loads(body) if body else {}
+    except ValueError:
+        payload = {}
+    jid = payload.get("job_id")
+    if jid:
+        return str(jid)
+    return current_job().job_id
+
+
+def _status_from_job_row(row: dict) -> dict:
+    """Build a status dict for a persisted (non-live) job row."""
+    return {
+        "job_id": row.get("id", ""),
+        "state": row.get("status", "idle"),
+        "dataset": row.get("dataset", ""),
+        "models": row.get("models", []),
+        "sample": row.get("sample"),
+        "concurrency": row.get("concurrency", 1),
+        "enable_thinking": bool(row.get("enable_thinking")),
+        "current_model": row.get("current_model", ""),
+        "current_item": 0,
+        "total_items": row.get("total_items", 0),
+        "done_items": row.get("done_items", 0),
+        "error": row.get("error", ""),
+        "created_at": row.get("created_at"),
+        "speeds": {},
+    }
+
 
 def _render_benchmark_page(config: Config) -> str:
     """Render the benchmark page from the shared design system: dataset/model
@@ -620,53 +708,35 @@ def _render_benchmark_page(config: Config) -> str:
     models = sorted(config.models.keys())
     datasets = list_datasets()
     job = current_job().status()
-    speeds = load_speeds()  # single-request throughput per model (tok/s)
 
-    # Aggregate scored JSONL by (dataset, model) — one table per dataset, so
+    # Single-request throughput per model (tok/s) — sourced from the SQLite
+    # store, falling back to the legacy speeds.json when the store is cold.
+    speeds: dict = {}
+    try:
+        from .benchmark.job import get_store
+        speeds = get_store().load_speeds()
+    except Exception:  # noqa: BLE001
+        logger.exception("benchmark speed read failed; falling back to JSONL")
+    if not speeds:
+        try:
+            speeds = load_speeds()
+        except Exception:  # noqa: BLE001
+            speeds = {}
+
+    # Aggregate scored results by (dataset, model) — one table per dataset, so
     # mmlu (500) / mmlu_pro (500) / smoke (6) are never merged into a
-    # misleading combined figure. Filenames are {model}_{dataset}_results.jsonl
-    # (new) or {model}_results.jsonl (legacy); the dataset is whatever remains
-    # after stripping the record's own model_name (model names contain
-    # underscores, e.g. Qwen3-1.7B-Q4_K_M, so strip-by-prefix is reliable).
-    tables = ""
-    results_dir = Path("benchmark_results")
-    if results_dir.is_dir():
-        from collections import OrderedDict
-        by_ds: dict = OrderedDict()
-        for f in sorted(results_dir.glob("*_results.jsonl")):
-            stem = f.stem[:-len("_results")]  # drop trailing _results
-            for line in f.read_text("utf-8").strip().splitlines():
-                if not line:
-                    continue
-                r = json.loads(line)
-                m = r.get("model_name", "?")
-                ds = ""
-                if m and stem.startswith(m):
-                    rest = stem[len(m):]
-                    ds = rest.lstrip("_") if rest else ""
-                elif "_" in stem:
-                    ds = stem.rsplit("_", 1)[-1]
-                s = by_ds.setdefault(ds, {}).setdefault(
-                    m, {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]),
-                        "lat": [], "tps": [], "tok": [], "thinking": None}
-                )
-                s["t"] += 1
-                if r.get("is_correct") is True:
-                    s["c"] += 1
-                cat = r.get("category", "?")
-                s["cat"][cat][0] += 1
-                if r.get("is_correct") is True:
-                    s["cat"][cat][1] += 1
-                if r.get("latency_ms"):
-                    s["lat"].append(r["latency_ms"])
-                if r.get("tps"):
-                    s["tps"].append(r["tps"])
-                if r.get("completion_tokens"):
-                    s["tok"].append(r["completion_tokens"])
-                th = r.get("thinking")
-                if th is not None:
-                    s["thinking"] = bool(th)
+    # misleading combined figure. The SQLite store is the source of truth; the
+    # JSONL glob is only a fallback for data that predates the store.
+    by_ds: dict = {}
+    try:
+        from .benchmark.job import get_store as _get_store
+        by_ds = _get_store().query_aggregate()
+    except Exception:  # noqa: BLE001
+        logger.exception("benchmark store aggregation failed; falling back to JSONL")
+        by_ds = _aggregate_jsonl(Path("benchmark_results"))
 
+    tables = ""
+    if by_ds:
         def _tag(cn: str, pct: float) -> str:
             cls = "ok" if pct >= 60 else ("warn" if pct >= 30 else "err")
             return f'<span class="tag {cls}">{cn} {pct:.0f}%</span>'
@@ -675,7 +745,7 @@ def _render_benchmark_page(config: Config) -> str:
             acc = round(s["c"] / s["t"] * 100, 1) if s["t"] else 0
             lat = round(sum(s["lat"]) / len(s["lat"]), 1) if s["lat"] else "-"
             avg_tok = round(sum(s["tok"]) / len(s["tok"]), 0) if s["tok"] else "-"
-            mode = "thinking" if s["thinking"] else "non-thinking" if s["thinking"] is not None else "-"
+            mode = s.get("thinking", "-")
             # Real subjects/categories (MMLU has 57) — show the largest few,
             # keep the rest as a +N count so the cell doesn't explode.
             cats = sorted(
@@ -688,9 +758,9 @@ def _render_benchmark_page(config: Config) -> str:
             )
             if len(cats) > 8:
                 tags += f'<span class="muted" style="font-size:11px">+{len(cats)-8}</span>'
-            # Throughput: single-request probe (benchmark_results/speeds.json),
-            # split into prefill and decode phases. NOT the batched per-item
-            # tps average, which is misleading under concurrency.
+            # Throughput: single-request probe, split into prefill and decode
+            # phases. NOT the batched per-item tps average, which is misleading
+            # under concurrency.
             sp = speeds.get(name, {})
             pre = sp.get("prefill_tps")
             dec = sp.get("decode_tps")
@@ -728,7 +798,8 @@ def _render_benchmark_page(config: Config) -> str:
                 f'<div class="table-scroll"><table>{head}<tbody>{body_rows or empty}</tbody></table></div>'
             )
 
-        tables = "".join(_table(ds, ms) for ds, ms in by_ds.items())
+        for ds in sorted(by_ds, key=lambda x: x or ""):
+            tables += _table(ds, by_ds[ds])
 
     # Group models by slot for a friendlier selector
     from collections import defaultdict as _dd
@@ -773,6 +844,12 @@ def _render_benchmark_page(config: Config) -> str:
       <button id="resumeBtn" data-i18n="resume" disabled>继续</button>
       <button id="stopBtn" class="danger" data-i18n="stop" disabled>停止</button>
     </div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap">
+      <label data-i18n="job" style="font-size:12px;min-width:40px">Job</label>
+      <select id="jobSel" style="max-width:420px"></select>
+      <button id="refreshJobsBtn" class="icon-btn" data-i18n="refresh">刷新</button>
+      <span id="jobInfo" class="muted" style="font-size:12px"></span>
+    </div>
     <div class="bm-picker">{model_picker}</div>
     <div class="progress" id="progWrap" style="display:none"><i id="progBar"></i></div>
     <div id="progText" class="muted" style="font-size:12px;margin-top:6px"></div>
@@ -800,34 +877,117 @@ def _render_benchmark_page(config: Config) -> str:
                 extra_js=_benchmark_js())
 
 
+def _aggregate_jsonl(results_dir: Path) -> dict[str, dict[str, dict]]:
+    """Fallback aggregation of ``*_results.jsonl`` (pre-SQLite data).
+
+    Produces the same shape as :meth:`BenchmarkStore.query_aggregate` so the
+    dashboard can render from either source.  Only used when the SQLite store
+    is empty/unavailable.
+    """
+    from collections import defaultdict
+
+    by_ds: dict[str, dict[str, dict]] = defaultdict(dict)
+    if not results_dir.is_dir():
+        return {}
+    for f in sorted(results_dir.glob("*_results.jsonl")):
+        stem = f.stem[:-len("_results")]
+        for line in f.read_text("utf-8").strip().splitlines():
+            if not line:
+                continue
+            r = json.loads(line)
+            m = r.get("model_name", "?")
+            ds = ""
+            if m and stem.startswith(m):
+                ds = stem[len(m):].lstrip("_")
+            elif "_" in stem:
+                ds = stem.rsplit("_", 1)[-1]
+            s = by_ds[ds].setdefault(
+                m, {"t": 0, "c": 0, "cat": defaultdict(lambda: [0, 0]),
+                    "lat": [], "tps": [], "tok": [], "thinking": set()}
+            )
+            s["t"] += 1
+            if r.get("is_correct") is True:
+                s["c"] += 1
+            cat = r.get("category", "?")
+            s["cat"][cat][0] += 1
+            if r.get("is_correct") is True:
+                s["cat"][cat][1] += 1
+            if r.get("latency_ms"):
+                s["lat"].append(r["latency_ms"])
+            if r.get("tps"):
+                s["tps"].append(r["tps"])
+            if r.get("completion_tokens"):
+                s["tok"].append(r["completion_tokens"])
+            if r.get("thinking") is not None:
+                s["thinking"].add(bool(r["thinking"]))
+
+    for models in by_ds.values():
+        for s in models.values():
+            s["cat"] = {k: list(v) for k, v in s["cat"].items()}
+            th = s.pop("thinking")
+            if th == {True}:
+                s["thinking"] = "thinking"
+            elif th == {False}:
+                s["thinking"] = "non-thinking"
+            elif th:
+                s["thinking"] = "mixed"
+            else:
+                s["thinking"] = "-"
+    return dict(by_ds)
+
+
 def _benchmark_js() -> str:
     return r"""
 let jobTimer = null;
+let currentJobId = '';
 
 function stopPolling() {
   if (jobTimer) { clearInterval(jobTimer); jobTimer = null; }
 }
 
+async function loadJobs() {
+  try {
+    const r = await authedFetch('/gateway/benchmark/jobs');
+    const d = await r.json();
+    const sel = $('jobSel');
+    sel.innerHTML = '';
+    for (const j of (d.jobs || [])) {
+      const opt = document.createElement('option');
+      opt.value = j.id;
+      const pct = j.total_items ? Math.round(100 * (j.done_items / j.total_items)) : 0;
+      opt.textContent = `${j.id} · ${j.status} · ${j.dataset} · ` +
+        `${(j.models || []).join('+')} · ${j.done_items}/${j.total_items} (${pct}%)`;
+      sel.appendChild(opt);
+    }
+    if (currentJobId) sel.value = currentJobId;
+  } catch (e) {}
+}
+
 async function refreshJob() {
   try {
-    const r = await authedFetch('/gateway/benchmark/status');
+    const q = currentJobId ? ('?job_id=' + encodeURIComponent(currentJobId)) : '';
+    const r = await authedFetch('/gateway/benchmark/status' + q);
     const j = await r.json();
     const wrap = $('progWrap'), bar = $('progBar'), txt = $('progText');
     const runBtn = $('runBtn'), pauseBtn = $('pauseBtn'), resumeBtn = $('resumeBtn'), stopBtn = $('stopBtn');
+    if (j.job_id) currentJobId = j.job_id;
+    $('jobInfo').textContent = j.job_id ? ('id=' + j.job_id + ' · ' + j.state) : '';
     if (j.state === 'running' || j.state === 'paused') {
       wrap.style.display = 'block';
       const pct = j.total_items ? Math.round(100 * j.done_items / j.total_items) : 0;
       bar.style.width = pct + '%';
       txt.textContent = (j.state === 'paused' ? i18n('paused') : i18n('running')) +
-        ' · ' + j.dataset + ' · ' + j.current_model + ' · ' + j.done_items + '/' + j.total_items;
+        ' · ' + j.dataset + ' · ' + (j.current_model || '-') + ' · ' + j.done_items + '/' + j.total_items;
       runBtn.disabled = true; pauseBtn.disabled = (j.state !== 'running');
       resumeBtn.disabled = (j.state !== 'paused'); stopBtn.disabled = false;
+      if (!jobTimer) jobTimer = setInterval(refreshJob, 2000);
     } else if (j.state === 'done' || j.state === 'stopped' || j.state === 'error') {
-      wrap.style.display = 'block';
-      bar.style.width = '100%';
+      wrap.style.display = 'block'; bar.style.width = '100%';
       txt.textContent = j.state.toUpperCase() + (j.error ? ' · ' + j.error : '');
       runBtn.disabled = false; pauseBtn.disabled = true; resumeBtn.disabled = true; stopBtn.disabled = true;
       stopPolling();
+    } else {
+      runBtn.disabled = false; pauseBtn.disabled = true; resumeBtn.disabled = true; stopBtn.disabled = true;
     }
   } catch (e) {}
 }
@@ -837,8 +997,7 @@ async function runBench() {
   const models = [...boxes].map(b => b.value);
   if (!models.length) models.push(...document.querySelectorAll('input[name="bmModel"]')).map(b => b.value);
   const payload = {
-    dataset: $('dsSel').value,
-    models,
+    dataset: $('dsSel').value, models,
     sample: parseInt($('sampleSel').value, 10) || null,
     concurrency: parseInt($('concSel').value, 10) || 1,
     enable_thinking: $('thinkSel').value === 'true',
@@ -852,32 +1011,45 @@ async function runBench() {
     $('jobErr').textContent = (d.error && d.error.message) || 'HTTP ' + r.status;
     return;
   }
+  const j = await r.json();
   $('jobErr').textContent = '';
+  currentJobId = j.job_id || '';
+  loadJobs();
   stopPolling();
   refreshJob();
   jobTimer = setInterval(refreshJob, 2000);
 }
 
-function setAllModels(checked) {
-  document.querySelectorAll('input[name="bmModel"]').forEach(b => b.checked = checked);
+function postJob(action) {
+  return async () => {
+    await authedFetch('/gateway/benchmark/' + action, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: currentJobId }),
+    });
+    refreshJob();
+  };
+}
+
+function setAllModels(c) {
+  document.querySelectorAll('input[name="bmModel"]').forEach(b => b.checked = c);
 }
 $('selectAllBtn').onclick = () => setAllModels(true);
 $('selectNoneBtn').onclick = () => setAllModels(false);
 $('runBtn').onclick = runBench;
-$('pauseBtn').onclick = async () => { await authedFetch('/gateway/benchmark/pause', { method: 'POST' }); refreshJob(); };
-$('resumeBtn').onclick = async () => { await authedFetch('/gateway/benchmark/resume', { method: 'POST' }); refreshJob(); };
-$('stopBtn').onclick = async () => { await authedFetch('/gateway/benchmark/stop', { method: 'POST' }); refreshJob(); };
+$('pauseBtn').onclick = postJob('pause');
+$('resumeBtn').onclick = postJob('resume');
+$('stopBtn').onclick = postJob('stop');
+$('jobSel').onchange = () => { currentJobId = $('jobSel').value; stopPolling(); refreshJob(); };
+$('refreshJobsBtn').onclick = () => loadJobs();
 
-// Poll only while a job is actually running — an idle page must not spam
-// /gateway/benchmark/status every few seconds.
 (async function init() {
   try {
+    await loadJobs();
     const j = await (await authedFetch('/gateway/benchmark/status')).json();
+    currentJobId = j.job_id || '';
+    refreshJob();
     if (j.state === 'running' || j.state === 'paused') {
-      refreshJob();
       jobTimer = setInterval(refreshJob, 2000);
-    } else {
-      refreshJob();  // renders the terminal state once, then stays quiet
     }
   } catch (e) {}
 })();
