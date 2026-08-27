@@ -335,10 +335,35 @@ def _get_ocrbench(sample: int | None = None) -> list[BenchmarkItem]:
 
 def _get_bfcl(sample: int | None = None) -> list[BenchmarkItem]:
     """BFCL function-calling items: keep the tool schemas + expected calls in
-    meta so the runner can pass tools and the scorer can compare calls."""
+    meta so the runner can pass tools and the scorer can compare calls.
+
+    Two data layouts are supported:
+    - HF layout: ``messages`` / ``tools`` / ``expected_tool_calls`` (exact
+      comparison scorer)
+    - BFCL v3 layout: ``question`` (text) + ``functions`` (tool schemas);
+      correctness is judged by the AST key-argument checker (function name +
+      required params + types) — the official leaderboard scores
+      simple/parallel/multiple this way without releasing ground truths.
+    """
     items_raw, _ = _load_processed("bfcl", sample)
     out = []
     for row in items_raw:
+        if row.get("functions"):
+            # BFCL v3: question text + tool schemas, AST scoring
+            out.append(BenchmarkItem(
+                item_id=row["item_id"],
+                category=str(row.get("subject") or "bfcl"),
+                question=row.get("question", row.get("item_id", "")),
+                ground_truth="(AST)",
+                meta={
+                    # OpenAI-compatible tool schemas for the runner
+                    "tools": [{"type": "function", "function": f} for f in row["functions"]],
+                    # raw schemas for the AST scorer
+                    "functions": row["functions"],
+                    "check": "ast",
+                },
+            ))
+            continue
         system = ""
         user_parts = []
         for m in (row.get("messages") or []):

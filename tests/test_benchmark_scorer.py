@@ -62,3 +62,69 @@ def test_code_harness_mbpp_style():
     r.raw_response = "def add(a, b):\n    return a + b\n"
     _score_code(r.raw_response, r)
     assert r.is_correct is True
+
+
+# ---------------------------------------------------------------------------
+# BFCL v3 AST key-argument scorer
+# ---------------------------------------------------------------------------
+
+from locallm_valet.benchmark.scorer import score_result
+
+
+def _bfcl_item(subject, functions):
+    return BenchmarkItem(item_id="bfcl_1", category=subject, question="Q",
+                         ground_truth="(AST)",
+                         meta={"functions": functions, "check": "ast"})
+
+
+def _tc(name, args):
+    return {"type": "function", "function": {"name": name, "arguments": args}}
+
+
+_TRI_FUNCS = [{
+    "name": "calculate_triangle_area", "description": "d",
+    "parameters": {"type": "dict", "properties": {
+        "base": {"type": "integer"}, "height": {"type": "integer"},
+        "unit": {"type": "string"}},
+        "required": ["base", "height"]},
+}]
+
+
+def test_bfcl_ast_simple_valid():
+    r = BenchmarkResult(item=_bfcl_item("bfcl_simple", _TRI_FUNCS), model_name="m")
+    r.tool_calls = [_tc("calculate_triangle_area", {"base": 10, "height": 5})]
+    score_result(r)
+    assert r.is_correct is True
+
+
+def test_bfcl_ast_simple_missing_required():
+    r = BenchmarkResult(item=_bfcl_item("bfcl_simple", _TRI_FUNCS), model_name="m")
+    r.tool_calls = [_tc("calculate_triangle_area", {"base": 10})]  # missing height
+    score_result(r)
+    assert r.is_correct is False
+
+
+def test_bfcl_ast_simple_wrong_type():
+    r = BenchmarkResult(item=_bfcl_item("bfcl_simple", _TRI_FUNCS), model_name="m")
+    r.tool_calls = [_tc("calculate_triangle_area", {"base": "abc", "height": 5})]
+    score_result(r)
+    assert r.is_correct is False
+    assert "expected integer" in r.score_detail
+
+
+def test_bfcl_ast_simple_requires_one_call():
+    r = BenchmarkResult(item=_bfcl_item("bfcl_simple", _TRI_FUNCS), model_name="m")
+    r.tool_calls = [
+        _tc("calculate_triangle_area", {"base": 1, "height": 2}),
+        _tc("calculate_triangle_area", {"base": 3, "height": 4}),
+    ]
+    score_result(r)
+    assert r.is_correct is False
+
+
+def test_bfcl_ast_unknown_function():
+    r = BenchmarkResult(item=_bfcl_item("bfcl_simple", _TRI_FUNCS), model_name="m")
+    r.tool_calls = [_tc("not_a_real_fn", {"x": 1})]
+    score_result(r)
+    assert r.is_correct is False
+    assert "unknown function" in r.score_detail

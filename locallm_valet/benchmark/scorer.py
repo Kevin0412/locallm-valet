@@ -24,8 +24,12 @@ def score_result(result: BenchmarkResult) -> None:
     """
     cat = result.item.category
 
-    # BFCL function calling: compare model tool_calls to expected. Runs BEFORE
+    # BFCL function calling: AST key-argument check (v3, no ground truth) or
+    # exact comparison against expected_tool_calls (HF layout). Runs BEFORE
     # the empty-text check — a valid BFCL answer is a tool_call with no text.
+    if result.item.meta and result.item.meta.get("check") == "ast":
+        _score_bfcl_ast(result)
+        return
     if cat == "bfcl" or (result.item.meta and "expected_tool_calls" in result.item.meta):
         _score_bfcl(result)
         return
@@ -307,6 +311,85 @@ def _score_code(text: str, result: BenchmarkResult) -> None:
 # ---------------------------------------------------------------------------
 # BFCL function-calling scorer (name + argument match)
 # ---------------------------------------------------------------------------
+
+_PY_TYPE_OK = {
+    "string": (str,),
+    "integer": (int,),
+    "float": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "tuple": (list,),
+    "dict": (dict,),
+    "object": (dict,),
+    "any": (str, int, float, bool, list, dict),
+}
+
+
+def _score_bfcl_ast(result: BenchmarkResult) -> None:
+    """BFCL v3 AST-style check: the model must call an EXISTING function with
+    all REQUIRED params of the right TYPE. Mirrors the official leaderboard's
+    simple/parallel key-argument checking (no ground truth is released).
+
+    ``simple`` requires exactly one call; parallel/multiple allow several.
+    """
+    import json as _json
+
+    functions = result.item.meta.get("functions") or []
+    emitted = result.tool_calls or []
+
+    def _norm(entry: dict) -> dict | None:
+        fn = entry.get("function") or entry
+        name = fn.get("name") or entry.get("name")
+        args = fn.get("arguments") or entry.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = _json.loads(args)
+            except Exception:
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
+        return {"name": name, "arguments": args} if name else None
+
+    calls = [n for n in (_norm(e) for e in emitted) if n]
+    cat = result.item.category or "bfcl"
+
+    if "simple" in cat and len(calls) != 1:
+        result.is_correct = False
+        result.score_detail = f"simple: expected 1 call, got {len(calls)}"
+        return
+    if not calls:
+        result.is_correct = False
+        result.score_detail = "no tool_calls emitted"
+        return
+
+    for call in calls:
+        fd = next((f for f in functions if f.get("name") == call["name"]), None)
+        if fd is None:
+            result.is_correct = False
+            result.score_detail = f"unknown function {call['name']!r}"
+            return
+        params = fd.get("parameters") or {}
+        props = params.get("properties") or {}
+        missing = [k for k in (params.get("required") or []) if k not in call["arguments"]]
+        if missing:
+            result.is_correct = False
+            result.score_detail = f"{call['name']}: missing required param(s) {missing}"
+            return
+        for k, v in call["arguments"].items():
+            if k in props:
+                t = props[k].get("type", "any")
+                types = _PY_TYPE_OK.get(t, _PY_TYPE_OK["any"])
+                # 数字字符串对 integer/float 宽容（模型常输出字符串数字）
+                ok = isinstance(v, types)
+                if not ok and t in ("integer", "float") and isinstance(v, str) and v.replace(".", "", 1).isdigit():
+                    ok = True
+                if not ok:
+                    result.is_correct = False
+                    result.score_detail = f"{call['name']}.{k}: expected {t}, got {type(v).__name__}"
+                    return
+    result.is_correct = True
+    result.score_detail = f"{len(calls)} valid call(s) (AST check passed)"
+
 
 def _score_bfcl(result: BenchmarkResult) -> None:
     """Score a BFCL item: the model must emit the expected function call(s).
