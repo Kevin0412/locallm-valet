@@ -236,6 +236,20 @@ def _score_exact(text: str, gt: str, result: BenchmarkResult) -> None:
 # Code execution scorer (HumanEval / MBPP) — pass@1 via subprocess
 # ---------------------------------------------------------------------------
 
+# The HumanEval prompts carry PEP 484 type hints (e.g. ``List[int]``) in their
+# signatures, and several hidden tests use stdlib helpers.  Without these
+# imports the harness dies at definition/parse time with ``NameError: name
+# 'List' is not defined``, which mis-attributes a harness bug to the model and
+# collapses the pass@1 score (observed: HumanEval ~1/164, MBPP ~7%).
+_CODE_PRELUDE = (
+    "from __future__ import annotations\n"
+    "from typing import *\n"
+    "import math, re, sys, json, itertools, functools\n"
+    "from collections import *\n"
+    "from itertools import *\n"
+)
+
+
 def _score_code(text: str, result: BenchmarkResult) -> None:
     """Run the model-generated code against the item's hidden tests in an
     isolated subprocess. pass@1: the single generated attempt must pass all
@@ -268,6 +282,8 @@ def _score_code(text: str, result: BenchmarkResult) -> None:
             setup = meta.get("test_setup", "") or ""
             asserts = "\n".join(meta.get("test_list", []))
             harness = f"{setup}\n\n{generated}\n\n{asserts}"
+
+        harness = _CODE_PRELUDE + harness
 
         proc = subprocess.run(
             [sys.executable, "-c", harness],
