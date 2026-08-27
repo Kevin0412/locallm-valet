@@ -230,6 +230,9 @@ class Config:
     pools: dict[str, PoolConfig] = field(default_factory=dict)
     slots: dict[str, SlotConfig] = field(default_factory=dict)
     models: dict[str, ModelSpec] = field(default_factory=dict)
+    # Path of the YAML file this config was loaded from (None for synthetic
+    # configs, e.g. tests). Settings write-back persists to this file.
+    _config_path: str | None = field(default=None, repr=False)
 
     def get_model(self, name: str) -> ModelSpec | None:
         return self.models.get(name)
@@ -528,4 +531,6 @@ def load_config(path: str | Path | None = None) -> Config:
         raise ConfigError("memory.safety_margin_gib must be >= 0")
     if cfg.backend.startup_timeout_seconds <= 0:
         raise ConfigError("backend.startup_timeout_seconds must be > 0")
+
+    cfg._config_path = str(cfg_path)
     return cfg

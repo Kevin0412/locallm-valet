@@ -13,6 +13,7 @@ Client-facing surface (fixed, independent of the backend):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -24,7 +25,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import __version__
 from .config import Config, ConfigError, load_config
+from .config_persistence import update_model_backend, update_server_section
 from .dashboard import DASHBOARD_HTML
+from .crypto import generate_api_key, hash_password, is_hashed, verify_password
 from .errors import InvalidRequest, ManagerError, BackendUnavailable
 from .memory import MemoryMonitor
 from .manager import ModelManager
@@ -35,6 +38,43 @@ from .usage import UsageRecorder, extract_usage_from_json
 from .benchmark.job import current_job, start_job, pause_job, resume_job, stop_job
 
 logger = logging.getLogger(__name__)
+
+
+class SettingsNotFound(ManagerError):
+    """Referenced resource (API key prefix) does not exist."""
+
+    http_status = 404
+    error_type = "not_found"
+
+
+def _bootstrap_default_credentials(config: Config) -> None:
+    """First-launch credentials + password-hash upgrade.
+
+    - No username/password at all → admin/admin (hashed), persisted so it
+      survives restarts.
+    - Plaintext password in the config file → upgraded in place to a
+      PBKDF2 hash; plaintext is never stored back.
+    """
+    cfg_path = getattr(config, "_config_path", None)
+    if not cfg_path:
+        return
+    updates: dict[str, str] = {}
+    if not config.server.username and not config.server.password:
+        config.server.username = "admin"
+        config.server.password = hash_password("admin")
+        logger.warning(
+            "Using default credentials (admin/admin) — please change via the settings page"
+        )
+        updates = {"username": config.server.username, "password": config.server.password}
+    elif config.server.password and not is_hashed(config.server.password):
+        config.server.password = hash_password(config.server.password)
+        logger.info("Stored password upgraded to a PBKDF2 hash in %s", cfg_path)
+        updates = {"password": config.server.password}
+    if updates:
+        try:
+            update_server_section(cfg_path, updates)
+        except Exception:  # noqa: BLE001 - bootstrap must never block startup
+            logger.exception("failed to persist credential changes to %s", cfg_path)
 
 
 def build_manager(config: Config):
@@ -58,9 +98,14 @@ def create_app(
 
     if config is None:
         config = load_config()
+    _bootstrap_default_credentials(config)
     manager = manager or build_manager(config)
     proxy = proxy or Proxy(config.backend.base_url)
     recorder = recorder or (UsageRecorder(config.usage.db_path) if config.usage.enabled else None)
+
+    # Serializes settings write-back (credentials / API keys / model backend
+    # edits all rewrite the same YAML file).
+    settings_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -93,7 +138,7 @@ def create_app(
                 except Exception:
                     return False
                 user, _, pw = decoded.partition(":")
-                if user == config.server.username and pw == config.server.password:
+                if user == config.server.username and verify_password(pw, config.server.password):
                     return True
             if request.headers.get("x-api-key", "") in config.server.api_keys:
                 return True
@@ -115,7 +160,11 @@ def create_app(
             if path.startswith(_AUTH_EXEMPT_PREFIXES):
                 return await call_next(request)
             if request.method == "GET" and path.startswith("/gateway/"):
-                return await call_next(request)
+                # The settings page shell itself stays open so the login
+                # modal can render; its data endpoints
+                # (/gateway/settings/api-keys, /models, ...) stay protected.
+                if path == "/gateway/settings" or not path.startswith("/gateway/settings"):
+                    return await call_next(request)
             if _check_credentials(request):
                 return await call_next(request)
             return JSONResponse(
@@ -297,6 +346,163 @@ def create_app(
             "state": slot_mgr.state.value,
             "model": slot_mgr.current_model,
             "active_requests": slot_mgr.active_requests,
+        }
+
+    # ---------------------------------------------------------- /gateway/settings
+    #
+    # The page shell (GET /gateway/settings) is auth-exempt so the shared
+    # login modal can render; every data endpoint below is gated by the
+    # middleware (GET data endpoints explicitly, POST/PUT/DELETE implicitly).
+
+    def _mask_key(key: str) -> str:
+        return key[:8] + "***"
+
+    async def _persist_settings(update_fn, *args) -> None:
+        """Write back to the YAML file. Callers hold ``settings_lock``
+        (mutation of the in-memory config and its persistence happen
+        together); the helper only does the I/O. Synthetic configs without a
+        backing file (tests) keep their changes in memory only."""
+        cfg_path = getattr(config, "_config_path", None)
+        if not cfg_path:
+            logger.info("no config file path on this Config; setting kept in memory only")
+            return
+        try:
+            update_fn(cfg_path, *args)
+        except KeyError as exc:
+            raise SettingsNotFound(str(exc)) from None
+
+    @app.get("/gateway/settings", response_class=HTMLResponse)
+    async def gateway_settings_page():
+        from .settings import render_settings_page
+
+        return HTMLResponse(render_settings_page())
+
+    @app.post("/gateway/settings/auth-check")
+    async def gateway_auth_check():
+        """Credential probe for the login modal. Correct Basic credentials
+        pass the middleware and land here; wrong ones never do (401)."""
+        return {"ok": True}
+
+    @app.get("/gateway/settings/api-keys")
+    async def gateway_list_api_keys():
+        return {"keys": [{"masked": _mask_key(k)} for k in config.server.api_keys]}
+
+    @app.post("/gateway/settings/api-keys")
+    async def gateway_create_api_key():
+        key = generate_api_key()
+        async with settings_lock:
+            config.server.api_keys.append(key)
+            await _persist_settings(
+                update_server_section, {"api_key": list(config.server.api_keys)}
+            )
+        # Full value returned exactly once — only the mask ever after.
+        return {"key": key, "masked": _mask_key(key)}
+
+    @app.delete("/gateway/settings/api-keys/{prefix}")
+    async def gateway_delete_api_key(prefix: str):
+        async with settings_lock:
+            remaining = [k for k in config.server.api_keys if not k.startswith(prefix)]
+            if len(remaining) == len(config.server.api_keys):
+                raise SettingsNotFound(f"no API key matches prefix {prefix!r}")
+            config.server.api_keys[:] = remaining
+            await _persist_settings(update_server_section, {"api_key": remaining})
+        return {"deleted": True}
+
+    @app.get("/gateway/settings/credentials")
+    async def gateway_get_credentials():
+        return {
+            "username": config.server.username,
+            "has_password": bool(config.server.password),
+        }
+
+    @app.post("/gateway/settings/credentials")
+    async def gateway_update_credentials(request: Request):
+        body = await request.body()
+        try:
+            payload = json.loads(body) if body else {}
+        except ValueError:
+            raise InvalidRequest("request body must be valid JSON") from None
+        current_password = payload.get("current_password", "")
+        new_username = str(payload.get("new_username") or "").strip()
+        new_password = str(payload.get("new_password") or "")
+        if not verify_password(current_password, config.server.password):
+            raise InvalidRequest("current_password is incorrect")
+        if len(new_password) < 4:
+            raise InvalidRequest("new_password must be at least 4 characters")
+
+        hashed = hash_password(new_password)
+        updates: dict[str, str] = {}
+        async with settings_lock:
+            if new_username:
+                config.server.username = new_username
+                updates["username"] = new_username
+            config.server.password = hashed
+            updates["password"] = hashed
+            await _persist_settings(update_server_section, updates)
+        return {"username": config.server.username}
+
+    @app.get("/gateway/settings/models")
+    async def gateway_get_model_backends():
+        return {
+            "global_command_template": config.backend.command_template,
+            "models": [
+                {
+                    "name": name,
+                    "command_template": spec.backend.command_template,
+                    "extra_args": list(spec.backend.extra_args),
+                    "health_path": spec.backend.health_path,
+                }
+                for name, spec in sorted(config.models.items())
+            ],
+        }
+
+    @app.put("/gateway/settings/models/{model_name}")
+    async def gateway_update_model_backend(model_name: str, request: Request):
+        spec = config.models.get(model_name)
+        if spec is None:
+            raise SettingsNotFound(f"unknown model {model_name!r}")
+        body = await request.body()
+        try:
+            payload = json.loads(body) if body else {}
+        except ValueError:
+            raise InvalidRequest("request body must be valid JSON") from None
+        if not isinstance(payload, dict):
+            raise InvalidRequest("request body must be a JSON object")
+
+        updates: dict[str, object] = {}
+        if "command_template" in payload:
+            tpl = payload["command_template"]
+            if tpl is not None:
+                if not isinstance(tpl, str) or not tpl.strip():
+                    raise InvalidRequest("command_template must be a non-empty string or null")
+            updates["command_template"] = tpl or None
+        if "health_path" in payload:
+            hp = payload["health_path"]
+            if hp is not None:
+                if not isinstance(hp, str) or not hp.strip():
+                    raise InvalidRequest("health_path must be a non-empty string or null")
+            updates["health_path"] = hp or None
+        if "extra_args" in payload:
+            args_raw = payload["extra_args"]
+            if not isinstance(args_raw, list) or not all(isinstance(a, str) for a in args_raw):
+                raise InvalidRequest("extra_args must be a list of strings (one per line)")
+            updates["extra_args"] = [a for a in args_raw] or None
+
+        # In-memory first; persisted inside the same lock.
+        async with settings_lock:
+            if "command_template" in updates:
+                spec.backend.command_template = updates["command_template"]  # type: ignore[assignment]
+            if "health_path" in updates:
+                spec.backend.health_path = updates["health_path"]  # type: ignore[assignment]
+            if "extra_args" in updates:
+                extra = updates["extra_args"]
+                spec.backend.extra_args = list(extra) if extra else []
+            await _persist_settings(update_model_backend, model_name, updates)
+        return {
+            "name": model_name,
+            "command_template": spec.backend.command_template,
+            "health_path": spec.backend.health_path,
+            "extra_args": list(spec.backend.extra_args),
         }
 
     # ------------------------------------------------------ usage / dashboard

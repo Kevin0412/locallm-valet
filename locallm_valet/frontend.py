@@ -152,6 +152,18 @@ const T = {
     slots_title: '设备槽位', pools_title: '资源池',
     thinking: '思考', non_thinking: '不思考', mode: '模式', avg_tok: '平均输出 tokens',
     dataset: '数据集',
+    settings: '设置', login: '登录', logout: '登出',
+    username: '用户名', password: '密码', login_failed: '登录失败',
+    settings_title: '系统设置', account: '账号',
+    api_keys: 'API 密钥', model_config: '模型后端配置',
+    save: '保存', cancel: '取消',
+    generate_key: '生成新密钥', delete_key: '删除',
+    key_masked: '密钥（掩码）', copy_hint: '请立即复制，此密钥仅显示一次',
+    change_password: '修改密码', current_password: '当前密码',
+    new_password: '新密码', confirm_password: '确认新密码', new_username: '新用户名',
+    command_template: '命令模板', extra_args: '额外参数（每行一个）',
+    health_path: '健康检查路径', restart_hint: '修改已保存到配置文件。需停止并重新加载模型才能生效。',
+    saved_ok: '已保存', select_model: '选择模型',
   },
   en: {
     dashboard: 'Dashboard', benchmark: 'Benchmark', theme_dark: 'Dark', theme_light: 'Light',
@@ -170,6 +182,19 @@ const T = {
     slots_title: 'Device Slots', pools_title: 'Resource Pools',
     thinking: 'Thinking', non_thinking: 'Non-thinking', mode: 'Mode', avg_tok: 'Avg output tokens',
     dataset: 'Dataset',
+    settings: 'Settings', login: 'Log in', logout: 'Log out',
+    username: 'Username', password: 'Password', login_failed: 'Login failed',
+    settings_title: 'Settings', account: 'Account',
+    api_keys: 'API Keys', model_config: 'Model Backend Config',
+    save: 'Save', cancel: 'Cancel',
+    generate_key: 'Generate new key', delete_key: 'Delete',
+    key_masked: 'Key (masked)', copy_hint: 'Copy it now — shown only once',
+    change_password: 'Change password', current_password: 'Current password',
+    new_password: 'New password', confirm_password: 'Confirm new password',
+    new_username: 'New username',
+    command_template: 'Command template', extra_args: 'Extra args (one per line)',
+    health_path: 'Health path', restart_hint: 'Saved to the config file. Stop and reload the model for changes to take effect.',
+    saved_ok: 'Saved', select_model: 'Select a model',
   },
 };
 const i18n = key => (T[lang()] && T[lang()][key]) || key;
@@ -197,20 +222,89 @@ function applyLangText() {
 }
 function fmt(n) { return (n ?? 0).toLocaleString(lang() === 'zh' ? 'zh-CN' : 'en-US'); }
 
-let apiKey = sessionStorage.getItem('valet_api_key') || '';
+// ---------------------------------------------------------------------------
+// Auth: username/password (Basic auth) instead of the old prompt()-driven
+// Bearer key. Credentials live in localStorage; a 401 pops the login modal
+// and the caller sees the failed response (no retry loop).
+// ---------------------------------------------------------------------------
+
+let credentials = JSON.parse(localStorage.getItem('valet_credentials') || 'null');
+
+function basicAuthHeader() {
+  if (!credentials || !credentials.u || credentials.p === undefined) return {};
+  // btoa on non-Latin1 passwords throws; encodeURIComponent keeps it safe.
+  return { 'Authorization': 'Basic ' + btoa(unescape(encodeURIComponent(credentials.u + ':' + credentials.p))) };
+}
+
 async function authedFetch(url, opts) {
-  const headers = { ...((opts && opts.headers) || {}) };
-  if (apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+  const headers = { ...((opts && opts.headers) || {}), ...basicAuthHeader() };
   const r = await fetch(url, { ...opts, headers });
-  if (r.status === 401) {
-    const k = prompt('API key / 密钥:');
-    if (k === null) return r;
-    apiKey = k.trim();
-    sessionStorage.setItem('valet_api_key', apiKey);
-    return authedFetch(url, opts);
-  }
+  if (r.status === 401) showLoginModal();
   return r;
 }
+
+function logout() {
+  localStorage.removeItem('valet_credentials');
+  location.reload();
+}
+
+function ensureLoginModal() {
+  if ($('loginWrap')) return $('loginWrap');
+  const wrap = document.createElement('div');
+  wrap.id = 'loginWrap';
+  wrap.style.cssText =
+    'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;' +
+    'justify-content:center;z-index:100';
+  wrap.innerHTML = `
+    <form id="loginForm" style="background:var(--panel);border:1px solid var(--border);
+      border-radius:10px;padding:22px;width:300px;box-shadow:var(--shadow);color:var(--fg)">
+      <h2 style="font-size:16px;margin-bottom:14px">locallm-valet · <span data-i18n="login">${i18n('login')}</span></h2>
+      <label style="display:block;font-size:12px;color:var(--fg-3);margin:8px 0 3px" data-i18n="username">${i18n('username')}</label>
+      <input type="text" id="loginUser" autocomplete="username" style="width:100%">
+      <label style="display:block;font-size:12px;color:var(--fg-3);margin:8px 0 3px" data-i18n="password">${i18n('password')}</label>
+      <input type="password" id="loginPass" autocomplete="current-password" style="width:100%">
+      <div id="loginErr" class="err-text" style="font-size:12px;min-height:18px;margin-top:6px"></div>
+      <button type="submit" class="primary" style="width:100%;margin-top:4px" data-i18n="login">${i18n('login')}</button>
+    </form>`;
+  document.body.appendChild(wrap);
+  wrap.querySelector('#loginForm').onsubmit = async e => {
+    e.preventDefault();
+    const u = wrap.querySelector('#loginUser').value.trim();
+    const p = wrap.querySelector('#loginPass').value;
+    try {
+      const r = await fetch('/gateway/settings/auth-check', {
+        method: 'POST',
+        headers: { 'Authorization': 'Basic ' + btoa(unescape(encodeURIComponent(u + ':' + p))) },
+      });
+      if (r.ok) {
+        credentials = { u, p };
+        localStorage.setItem('valet_credentials', JSON.stringify(credentials));
+        location.reload();
+        return;
+      }
+    } catch (err) {}
+    wrap.querySelector('#loginErr').textContent = i18n('login_failed');
+  };
+  return wrap;
+}
+
+function showLoginModal() {
+  ensureLoginModal().querySelector('#loginUser').focus();
+}
+
+async function autoCheckCredentials() {
+  try {
+    const r = await authedFetch('/gateway/settings/auth-check', { method: 'POST' });
+    if (r.status !== 401 && !r.ok) throw new Error();
+  } catch (e) {
+    if (credentials) {
+      localStorage.removeItem('valet_credentials'); // stale saved login
+      credentials = null;
+    }
+    showLoginModal();
+  }
+}
+
 """
 
 
@@ -228,8 +322,10 @@ def _topbar(active: str) -> str:
     {_nav('/gateway/benchmark', 'benchmark', active == 'benchmark')}
   </nav>
   <span class="spacer"></span>
+  <a class="icon-btn" href="/gateway/settings" data-i18n="settings">⚙ 设置</a>
   <button class="icon-btn" data-theme-btn onclick="toggleTheme()"></button>
   <button class="icon-btn" onclick="toggleLang()">EN / 中文</button>
+  <button class="icon-btn" onclick="logout()" data-i18n="logout">登出</button>
 </div>
 """
 
@@ -256,6 +352,7 @@ document.addEventListener('DOMContentLoaded', () => {{
   document.querySelectorAll('[data-theme-btn]').forEach(b => b.onclick = toggleTheme);
   {extra_js}
 }});
+autoCheckCredentials();
 </script>
 </body>
 </html>"""
