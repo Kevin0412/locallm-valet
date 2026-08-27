@@ -73,3 +73,46 @@ def verify_password(password: str, stored: str | None) -> bool:
 def generate_api_key() -> str:
     """A fresh Bearer key: ``sk-`` + 32 hex chars (128 bits of entropy)."""
     return "sk-" + secrets.token_hex(32)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Small CLI to hash a password for pasting into ``config.yaml``.
+
+    Usage::
+
+        python -m locallm_valet.crypto hash '<password>'
+        python -m locallm_valet.crypto verify '<password>' '<stored-hash>'
+
+    ``hash`` prints a single PBKDF2 hash suitable for the ``server.password``
+    setting; ``verify`` checks a password against a stored hash / plaintext
+    (exits 0 on match, 1 otherwise).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m locallm_valet.crypto",
+        description="Generate/verify locallm-valet password hashes.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_hash = sub.add_parser("hash", help="hash a password for config.yaml")
+    p_hash.add_argument("password")
+
+    p_verify = sub.add_parser("verify", help="check a password against a stored hash")
+    p_verify.add_argument("password")
+    p_verify.add_argument("stored")
+
+    args = parser.parse_args(argv)
+    if args.command == "hash":
+        print(hash_password(args.password))
+        return 0
+    if args.command == "verify":
+        ok = verify_password(args.password, args.stored)
+        print("OK" if ok else "FAIL")
+        return 0 if ok else 1
+    parser.error("unknown command")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

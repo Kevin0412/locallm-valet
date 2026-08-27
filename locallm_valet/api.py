@@ -427,18 +427,22 @@ def create_app(
         new_password = str(payload.get("new_password") or "")
         if not verify_password(current_password, config.server.password):
             raise InvalidRequest("current_password is incorrect")
-        if len(new_password) < 4:
+        # A username-only change keeps the existing password: only validate /
+        # rotate the password when a new one is actually supplied.
+        if new_password and len(new_password) < 4:
             raise InvalidRequest("new_password must be at least 4 characters")
 
-        hashed = hash_password(new_password)
         updates: dict[str, str] = {}
         async with settings_lock:
             if new_username:
                 config.server.username = new_username
                 updates["username"] = new_username
-            config.server.password = hashed
-            updates["password"] = hashed
-            await _persist_settings(update_server_section, updates)
+            if new_password:
+                config.server.password = hash_password(new_password)
+                updates["password"] = config.server.password
+            # Skip a no-op rewrite (a bare YAML round-trip also strips comments).
+            if updates:
+                await _persist_settings(update_server_section, updates)
         return {"username": config.server.username}
 
     @app.get("/gateway/settings/models")

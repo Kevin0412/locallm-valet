@@ -21,6 +21,8 @@ server:
   # — logged as a warning; change them via the settings page (/gateway/settings).
   # Passwords are stored as PBKDF2-SHA256 hashes; a plaintext password found
   # in this file is upgraded to a hash on the next startup automatically.
+  # To generate a hash to paste here, run:
+  #   python -m locallm_valet.crypto hash '<password>'
   # Env overrides: LOCALLM_VALET_USERNAME / LOCALLM_VALET_PASSWORD.
   # username: admin
   # password: pbkdf2:sha256:260000$<salt>$<hash>

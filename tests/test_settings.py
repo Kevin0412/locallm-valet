@@ -47,6 +47,22 @@ def test_generate_api_key_format():
     assert generate_api_key() != key
 
 
+def test_crypto_cli_hash_and_verify(capsys):
+    """``python -m locallm_valet.crypto hash`` prints a usable hash and
+    ``verify`` round-trips it."""
+    from locallm_valet.crypto import main
+
+    assert main(["hash", "s3cret"]) == 0
+    stored = capsys.readouterr().out.strip()
+    assert is_hashed(stored)
+    assert verify_password("s3cret", stored)
+
+    assert main(["verify", "s3cret", stored]) == 0
+    assert "OK" in capsys.readouterr().out
+    assert main(["verify", "wrong", stored]) == 1
+    assert "FAIL" in capsys.readouterr().out
+
+
 # ------------------------------------------------------- first-launch defaults
 
 
@@ -204,6 +220,44 @@ async def test_change_credentials(tmp_path):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
         assert (await client.post("/gateway/settings/auth-check", headers=_basic("admin", "old-pw"))).status_code == 401
         assert (await client.post("/gateway/settings/auth-check", headers=_basic("admin", "new-secret"))).status_code == 200
+
+
+async def test_change_username_only(tmp_path):
+    """Changing ONLY the username keeps the existing password — the settings
+    userForm sends no ``new_password`` and must not be rejected."""
+    cfg = make_config()
+    cfg._config_path = str(tmp_path / "config.yaml")
+    original_hash = hash_password("same-pw")
+    data = yaml.safe_load(_CONFIG_TEMPLATE.replace("8101", "8100"))
+    data["server"]["username"] = "admin"
+    data["server"]["password"] = original_hash
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    cfg.server.username = "admin"
+    cfg.server.password = original_hash
+    app = create_app(config=cfg)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        r = await client.post(
+            "/gateway/settings/credentials",
+            json={"current_password": "same-pw", "new_username": "kevin"},
+            headers=_basic("admin", "same-pw"),
+        )
+        assert r.status_code == 200
+        assert r.json() == {"username": "kevin"}
+
+    # Username changed; the (unchanged) password still authenticates.
+    assert cfg.server.username == "kevin"
+    # Password must NOT be re-hashed by a username-only change.
+    assert cfg.server.password == original_hash
+    assert verify_password("same-pw", cfg.server.password)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        assert (await client.post("/gateway/settings/auth-check", headers=_basic("kevin", "same-pw"))).status_code == 200
+        assert (await client.post("/gateway/settings/auth-check", headers=_basic("admin", "same-pw"))).status_code == 401
+
+    # Persisted: username rewritten, the pre-existing password hash untouched.
+    saved = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert saved["server"]["username"] == "kevin"
+    assert saved["server"]["password"] == original_hash
+    assert saved["server"]["port"] == 8100  # untouched sections survive
 
 
 async def test_model_backend_edit(tmp_path):
