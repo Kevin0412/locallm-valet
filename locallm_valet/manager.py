@@ -240,9 +240,28 @@ class ModelManager:
         self.active_requests = max(0, self.active_requests - 1)
         self.last_activity = self._now()
 
-    async def _check_memory(self, spec: ModelSpec, context: str) -> None:
-        """Gate on resource pools (slots architecture) or, when no pool
-        monitor is configured, on the legacy VRAM/RAM fields.
+    # -------------------------------------------------- SlotManager shims
+    #
+    # ``create_app`` accepts either a SlotManager (multi-slot, production)
+    # or a bare ModelManager (tests / legacy single-device setups).  api.py
+    # addresses both through the same calls, so ModelManager exposes the
+    # small SlotManager-shaped surface — it IS its own single slot.
+
+    def get_slot_manager(self, model_name: str) -> "ModelManager":
+        return self
+
+    @property
+    def slots(self) -> dict[str, "ModelManager"]:
+        return {self.slot_name: self}
+
+    def base_url_for(self, model_name: str) -> str:
+        return f"http://{self.cfg.backend.host}:{self.cfg.backend.port}"
+
+    def _memory_blockers(self, spec: ModelSpec, context: str) -> list[str]:
+        """Resource-gating problems that would block ``context`` (start /
+        switch) for ``spec`` — shared by the hard gate (``_check_memory``)
+        and the read-only feasibility query (``start_status``).  Empty list
+        = the gate passes.
 
         Pool gating:
         - ``spec.required_pools`` declares per-pool needs; each named pool is
@@ -252,10 +271,7 @@ class ModelManager:
         - Legacy ``required_ram_gib`` → ``system_ram`` pool.
         - A pool that cannot be probed (e.g. vram without NVML) is skipped,
           never hard-failing.
-
-        Never hard-start into an OOM: refuse BEFORE launching.
         """
-
         margin = self.cfg.memory.safety_margin_gib
         problems: list[str] = []
 
@@ -284,9 +300,7 @@ class ModelManager:
                         f"pool '{pool_name}' needs {needed:.1f} GiB ({need:.1f} "
                         f"required + {margin:.1f} margin), only {free:.1f} GiB available"
                     )
-            if problems:
-                raise InsufficientMemory(f"cannot {context} model {spec.name!r}: " + "; ".join(problems))
-            return
+            return problems
 
         # Legacy single-device path (no pool monitor injected)
         if spec.required_vram_gib > 0:
@@ -314,6 +328,16 @@ class ModelManager:
                     f"required + {margin:.1f} margin), only {free:.1f} GiB available"
                 )
 
+        return problems
+
+    async def _check_memory(self, spec: ModelSpec, context: str) -> None:
+        """Gate on resource pools (slots architecture) or, when no pool
+        monitor is configured, on the legacy VRAM/RAM fields.
+
+        Never hard-start into an OOM: refuse BEFORE launching.
+        """
+
+        problems = self._memory_blockers(spec, context)
         if problems:
             raise InsufficientMemory(f"cannot {context} model {spec.name!r}: " + "; ".join(problems))
 
@@ -619,6 +643,42 @@ class ModelManager:
 
     # -------------------------------------------------------------- status
 
+    def start_status(self, spec: ModelSpec) -> dict:
+        """Read-only feasibility of bringing ``spec`` up on this slot.
+
+        Serves the dashboard's per-model status panel (/gateway/models):
+        never spawns a process and never raises — it reports what a request
+        for ``spec`` would do **right now**:
+
+        - ``running``    — already loaded on this slot.
+        - ``startable``  — slot idle and every resource gate passes.
+        - ``switchable`` — the slot is serving another (idle) model; an
+          on-demand switch would bring this one up.
+        - ``blocked``    — a resource gate refuses, requests are in flight
+          (no preemption), or the slot is mid-transition; ``reason`` says why.
+        """
+        if self.state is State.RUNNING and self.current_model == spec.name:
+            return {"state": "running", "reason": None}
+        if self.state is State.STOPPED:
+            problems = self._memory_blockers(spec, context="start")
+            if problems:
+                return {"state": "blocked", "reason": "; ".join(problems)}
+            return {"state": "startable", "reason": None}
+        if self.state is State.RUNNING:
+            if self.active_requests > 0:
+                return {
+                    "state": "blocked",
+                    "reason": (
+                        f"slot '{self.slot_name}' serves {self.current_model!r} with "
+                        f"{self.active_requests} active request(s) (no preemption)"
+                    ),
+                }
+            return {
+                "state": "switchable",
+                "reason": f"slot '{self.slot_name}' currently runs {self.current_model!r}",
+            }
+        return {"state": "blocked", "reason": f"slot '{self.slot_name}' is {self.state.value}"}
+
     def status(self) -> dict:
         memory_info: dict
         if self.memory.nvml_available:
@@ -661,15 +721,23 @@ class ModelManager:
     def models_status(self) -> list[dict]:
         out = []
         for name, spec in self.cfg.models.items():
+            loaded = self.state is State.RUNNING and self.current_model == name
+            st = self.start_status(spec)
             out.append(
                 {
                     "name": name,
+                    "slot": self.slot_name,
                     "path": spec.path,
                     "required_vram_gib": spec.required_vram_gib,
                     "required_ram_gib": spec.required_ram_gib,
                     "extra_args": spec.backend.extra_args,
                     "max_concurrency": spec.backend.max_concurrency,
-                    "loaded": self.state is State.RUNNING and self.current_model == name,
+                    "loaded": loaded,
+                    # Per-model start feasibility (dashboard): running /
+                    # startable / switchable / blocked + human reason.
+                    "state": st["state"],
+                    "startable": st["state"] != "blocked",
+                    "start_reason": st["reason"],
                     "max_context_tokens": (
                         self.max_context_tokens
                         if self.state is State.RUNNING and self.current_model == name

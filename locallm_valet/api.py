@@ -342,6 +342,13 @@ def create_app(
     async def gateway_status():
         return manager.status()
 
+    def _slots_view() -> dict:
+        """Slot view after a stop — used when the injected manager is a bare
+        single-slot ModelManager (``stop`` returns None there; the
+        SlotManager already returns this shape itself)."""
+        return {name: {"state": m.state.value, "model": m.current_model}
+                for name, m in manager.slots.items()}
+
     @app.get("/gateway/models")
     async def gateway_models():
         return {
@@ -354,13 +361,13 @@ def create_app(
     async def gateway_stop():
         """正常关闭所有槽：空闲时（任意状态）接受并清资源；正在服务时 503。"""
         result = await manager.stop(reason="manual")
-        return {"slots": result}
+        return {"slots": result if result is not None else _slots_view()}
 
     @app.post("/gateway/force-stop")
     async def gateway_force_stop():
         """强制关闭所有槽：无条件清资源，即使有活跃请求（会切断流式连接）。"""
         result = await manager.stop(reason="manual (forced)", force=True)
-        return {"slots": result}
+        return {"slots": result if result is not None else _slots_view()}
 
     @app.post("/gateway/preload/{model_name}")
     async def gateway_preload(model_name: str):

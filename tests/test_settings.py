@@ -158,6 +158,9 @@ async def test_settings_page_shell_open_but_data_gated():
         shell = await client.get("/gateway/settings")
         assert shell.status_code == 200
         assert "authedFetch" in shell.text
+        # Settings is the one page whose data endpoints are all gated — it
+        # validates stored credentials on load (pops the login modal on 401).
+        assert "autoCheckCredentials();" in shell.text
         for path in ("/gateway/settings/api-keys", "/gateway/settings/models"):
             assert (await client.get(path)).status_code == 401
         assert (await client.get("/gateway/status")).status_code == 200  # open GET stays open

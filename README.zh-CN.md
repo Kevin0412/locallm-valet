@@ -190,8 +190,10 @@ models:
 
 配置 `server.api_key`（字符串或列表）或 `LOCALLM_VALET_API_KEY`（逗号分隔多 key）。
 之后所有 `/v1/*` 与 `/gateway/*` 数据接口要求 `Authorization: Bearer <key>`
-（否则 401 `authentication_error`）。免认证例外：`/docs`、`/redoc`、`/openapi.json`、
-`/gateway/dashboard`（静态壳，页面 401 时自动弹窗要 key）。**未配置 key = 全开**。
+（否则 401 `authentication_error`）。免认证例外：`/docs`、`/redoc`、`/openapi.json`，
+以及只读面 `GET /gateway/{status,models,usage,dashboard,benchmark,benchmark/jobs,benchmark/status}`
+——访客无需登录即可看板页与评测结果；登录框只在真正用到时弹出
+（打开设置页、运行/暂停/继续评测等）。**未配置 key = 全开**。
 
 ## 状态机与并发
 

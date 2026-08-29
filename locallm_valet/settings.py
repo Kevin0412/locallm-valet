@@ -244,11 +244,18 @@ loadModels();
 
 
 def render_settings_page() -> str:
-    """Full settings page HTML built fresh on every request."""
+    """Full settings page HTML built fresh on every request.
+
+    ``auth_check=True``: the settings shell is the one page whose data
+    endpoints are all auth-gated, so loading it (re)validates the stored
+    credentials and pops the login modal when they are missing/expired.
+    Dashboard / benchmark stay guest-readable and never auto-pop it.
+    """
     return page(
         "系统设置",
         "Settings",
         active="settings",
         body=_BODY,
         extra_js=_SETTINGS_JS,
+        auth_check=True,
     )

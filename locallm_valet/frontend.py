@@ -150,6 +150,8 @@ const T = {
     category: '分项', avg_lat: '平均耗时 ms', avg_tps: '吞吐 tok/s',
     running: '运行中', paused: '已暂停', select_all: '全选', select_none: '清空',
     slots_title: '设备槽位', pools_title: '资源池',
+    models_title: '模型状态', slot_name: '槽位', note: '说明',
+    st_running: '运行中', st_startable: '可启动', st_switchable: '可切换', st_blocked: '不可启动',
     thinking: '思考', non_thinking: '不思考', mode: '模式', avg_tok: '平均输出 tokens',
     dataset: '数据集',
     settings: '设置', login: '登录', logout: '登出',
@@ -180,6 +182,8 @@ const T = {
     category: 'Breakdown', avg_lat: 'Avg Latency ms', avg_tps: 'Throughput tok/s',
     running: 'Running', paused: 'Paused', select_all: 'Select All', select_none: 'Clear',
     slots_title: 'Device Slots', pools_title: 'Resource Pools',
+    models_title: 'Model Status', slot_name: 'Slot', note: 'Note',
+    st_running: 'Running', st_startable: 'Startable', st_switchable: 'Switchable', st_blocked: 'Cannot start',
     thinking: 'Thinking', non_thinking: 'Non-thinking', mode: 'Mode', avg_tok: 'Avg output tokens',
     dataset: 'Dataset',
     settings: 'Settings', login: 'Log in', logout: 'Log out',
@@ -246,6 +250,15 @@ async function authedFetch(url, opts) {
 function logout() {
   localStorage.removeItem('valet_credentials');
   location.reload();
+}
+
+// Auth-aware chrome: guest pages (dashboard / benchmark) render without
+// credentials — show 登录, hide 登出 until the user actually logs in.
+function applyAuthUI() {
+  const loggedIn = !!(credentials && credentials.u);
+  document.querySelectorAll('[data-auth]').forEach(el => {
+    el.style.display = (el.dataset.auth === (loggedIn ? 'in' : 'out')) ? '' : 'none';
+  });
 }
 
 function ensureLoginModal() {
@@ -325,13 +338,28 @@ def _topbar(active: str) -> str:
   <a class="icon-btn" href="/gateway/settings" data-i18n="settings">⚙ 设置</a>
   <button class="icon-btn" data-theme-btn onclick="toggleTheme()"></button>
   <button class="icon-btn" onclick="toggleLang()">EN / 中文</button>
-  <button class="icon-btn" onclick="logout()" data-i18n="logout">登出</button>
+  <button class="icon-btn" data-auth="out" onclick="showLoginModal()" data-i18n="login">登录</button>
+  <button class="icon-btn" data-auth="in" onclick="logout()" data-i18n="logout">登出</button>
 </div>
 """
 
 
-def page(title_zh: str, title_en: str, body: str, active: str, extra_js: str = "") -> str:
-    """Render a full page from the shared design system."""
+def page(
+    title_zh: str,
+    title_en: str,
+    body: str,
+    active: str,
+    extra_js: str = "",
+    auth_check: bool = False,
+) -> str:
+    """Render a full page from the shared design system.
+
+    ``auth_check``: whether loading the page should verify stored credentials
+    and pop the login modal on 401.  Only the settings page (whose data
+    endpoints are all auth-gated) enables it — the dashboard and benchmark
+    shells stay readable by guests; a 401 on any authedFetch still pops the
+    modal exactly when it happens.
+    """
     title = title_zh if lang_default() == "zh" else title_en
     return f"""<!DOCTYPE html>
 <html lang="zh-CN" data-theme="dark">
@@ -350,9 +378,10 @@ applyTheme();
 document.addEventListener('DOMContentLoaded', () => {{
   applyLangText();
   document.querySelectorAll('[data-theme-btn]').forEach(b => b.onclick = toggleTheme);
+  applyAuthUI();
   {extra_js}
 }});
-autoCheckCredentials();
+{'autoCheckCredentials();' if auth_check else ''}
 </script>
 </body>
 </html>"""

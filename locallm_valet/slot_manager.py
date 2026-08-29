@@ -143,11 +143,23 @@ class SlotManager:
         }
 
     def models_status(self) -> list[dict]:
-        """Per-model status including slot assignment and load state."""
+        """Per-model status including slot assignment and load state.
+
+        Every entry also carries the *read-only* start feasibility of its
+        slot manager (``state``: running / startable / switchable / blocked,
+        ``startable`` boolean, ``start_reason`` human explanation) so the
+        dashboard can answer "can this model be started, or is it running"
+        without spawning anything.
+        """
         out = []
         for name, spec in self.cfg.models.items():
             m = self.slots.get(spec.slot)
             loaded = m is not None and m.state is State.RUNNING and m.current_model == name
+            if m is not None:
+                st = m.start_status(spec)
+                state, startable, reason = st["state"], st["state"] != "blocked", st["reason"]
+            else:
+                state, startable, reason = "blocked", False, f"slot '{spec.slot}' is not configured"
             out.append(
                 {
                     "name": name,
@@ -158,6 +170,9 @@ class SlotManager:
                     "required_pools": spec.required_pools,
                     "extra_args": spec.backend.extra_args,
                     "loaded": loaded,
+                    "state": state,
+                    "startable": startable,
+                    "start_reason": reason,
                     "max_context_tokens": (
                         m.max_context_tokens if loaded else None
                     ),

@@ -172,7 +172,7 @@ Streaming requests get `stream_options.include_usage=true` injected automaticall
 
 ### API-key auth
 
-Set `server.api_key` (string or list) or `LOCALLM_VALET_API_KEY` (comma-separated). All `/v1/*` and `/gateway/*` data endpoints then require `Authorization: Bearer <key>` (401 `authentication_error` otherwise). Exempt: `/docs`, `/redoc`, `/openapi.json`, `/gateway/dashboard` (static shell; the page prompts for the key on 401). **No key configured = open access.**
+Set `server.api_key` (string or list) or `LOCALLM_VALET_API_KEY` (comma-separated). All `/v1/*` and `/gateway/*` data endpoints then require `Authorization: Bearer <key>` (401 `authentication_error` otherwise). Exempt: `/docs`, `/redoc`, `/openapi.json`, and the read-only surfaces — `GET /gateway/{status,models,usage,dashboard,benchmark,benchmark/jobs,benchmark/status}` — so guests can watch the dashboard and browse benchmark results without credentials. The login modal only appears when it is actually needed (settings page load, benchmark run / pause / resume, ...). **No key configured = open access.**
 
 ## State machine & concurrency
 

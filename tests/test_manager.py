@@ -29,6 +29,33 @@ async def test_start_on_demand(manager, memory, runner):
     assert memory.release_waits == 0  # a cold start never waits for VRAM release
 
 
+async def test_start_status_read_only(manager, memory, runner):
+    """start_status reports start feasibility without spawning anything —
+    the dashboard's "can this model be started, or is it running" answer."""
+    memory.free_g = 40
+    assert manager.start_status(manager.cfg.models["qwen"]) == {
+        "state": "startable", "reason": None,
+    }
+    # low VRAM → blocked with the same message a real start would raise
+    memory.free_g = 30
+    st = manager.start_status(manager.cfg.models["qwen"])
+    assert st["state"] == "blocked"
+    assert "34.0 GiB" in st["reason"]
+    # loaded → running; same-slot model → switchable; busy slot → blocked
+    memory.free_g = 40
+    await manager.ensure_loaded("qwen")
+    assert manager.start_status(manager.cfg.models["qwen"])["state"] == "running"
+    assert manager.start_status(manager.cfg.models["gemma"])["state"] == "switchable"
+    manager.request_started()
+    st = manager.start_status(manager.cfg.models["gemma"])
+    assert st["state"] == "blocked"
+    assert "active request" in st["reason"]
+    manager.request_finished()
+    # mid-transition → blocked with the state machine's own wording
+    await manager.stop()
+    assert manager.start_status(manager.cfg.models["gemma"])["state"] != "running"
+
+
 async def test_direct_route_when_model_matches(manager, memory, runner):
     memory.free_g = 40
     await manager.ensure_loaded("qwen")

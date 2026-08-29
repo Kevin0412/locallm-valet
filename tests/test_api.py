@@ -259,7 +259,7 @@ async def test_gateway_stop_then_restart_on_demand(stack):
     await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     resp = await client.post("/gateway/stop")
     assert resp.status_code == 200
-    assert resp.json()["state"] == "stopped"
+    assert resp.json()["slots"]["cpu"]["state"] == "stopped"
     resp = await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
     assert resp.status_code == 200
     assert runner.starts == ["qwen", "qwen"]
@@ -286,7 +286,7 @@ async def test_gateway_force_stop_when_busy(stack):
     manager.request_started()  # in-flight request
     resp = await client.post("/gateway/force-stop")
     assert resp.status_code == 200
-    assert resp.json()["state"] == "stopped"
+    assert resp.json()["slots"]["cpu"]["state"] == "stopped"
     assert manager.state.value == "stopped"
     assert runner.stops == 1
     manager.request_finished()
@@ -305,7 +305,7 @@ async def test_gateway_stop_cancels_starting(stack):
     assert manager.state.value == "starting"
     resp = await client.post("/gateway/stop")
     assert resp.status_code == 200
-    assert resp.json()["state"] == "stopped"
+    assert resp.json()["slots"]["cpu"]["state"] == "stopped"
     r = await task
     assert r.status_code == 503
     assert r.json()["error"]["type"] == "backend_unavailable"
@@ -403,6 +403,49 @@ async def test_dashboard_page_exempt_from_auth():
         r = await client.get("/gateway/dashboard")
         assert r.status_code == 200
         assert "authedFetch" in r.text
+        # Guests read the dashboard without a login prompt: the page must NOT
+        # auto-check credentials on load (only the settings page does).
+        assert "autoCheckCredentials();" not in r.text
+        # Guest chrome: a 登录 entry is offered; 登出 only after login.
+        assert 'data-auth="out"' in r.text
+        assert 'data-auth="in"' in r.text
+
+
+async def test_gateway_models_startability(stack):
+    """/gateway/models answers "can this model be started, or is it running"."""
+    client, manager, runner, memory = stack
+
+    # idle slot, enough VRAM for both (qwen needs 30+4 GiB, gemma 18+4)
+    memory.free_g = 40
+    by_name = {m["name"]: m for m in (await client.get("/gateway/models")).json()["models"]}
+    assert by_name["qwen"]["state"] == "startable"
+    assert by_name["qwen"]["startable"] is True
+    assert by_name["gemma"]["state"] == "startable"
+
+    # enough for gemma (22 GiB) but not for qwen (34 GiB)
+    memory.free_g = 30
+    by_name = {m["name"]: m for m in (await client.get("/gateway/models")).json()["models"]}
+    assert by_name["qwen"]["state"] == "blocked"
+    assert by_name["qwen"]["startable"] is False
+    assert "34.0 GiB" in by_name["qwen"]["start_reason"]
+    assert by_name["gemma"]["state"] == "startable"
+
+    # qwen loaded → running; gemma shares the slot → switchable (idle)
+    memory.free_g = 40
+    await client.post("/v1/chat/completions", json={"model": "qwen", "messages": []})
+    by_name = {m["name"]: m for m in (await client.get("/gateway/models")).json()["models"]}
+    assert by_name["qwen"]["state"] == "running"
+    assert by_name["qwen"]["loaded"] is True
+    assert by_name["gemma"]["state"] == "switchable"
+    assert by_name["gemma"]["startable"] is True
+
+    # busy slot → no preemption → gemma blocked with a clear reason
+    manager.request_started()
+    by_name = {m["name"]: m for m in (await client.get("/gateway/models")).json()["models"]}
+    assert by_name["gemma"]["state"] == "blocked"
+    assert by_name["gemma"]["startable"] is False
+    assert "active request" in by_name["gemma"]["start_reason"]
+    manager.request_finished()
 
 
 async def test_no_key_configured_open_access(stack):

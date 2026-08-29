@@ -32,6 +32,21 @@ DASHBOARD_HTML = page(
 
   <div class="cards" id="cards"></div>
 
+  <div class="panel">
+    <h2 data-i18n="models_title">模型状态</h2>
+    <div class="table-scroll">
+    <table id="modelStateTable">
+      <thead><tr>
+        <th class="wrap" data-i18n="model">模型</th>
+        <th data-i18n="slot_name">槽位</th>
+        <th data-i18n="status">状态</th>
+        <th class="wrap" data-i18n="note">说明</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    </div>
+  </div>
+
   <div id="slotsPanel"></div>
 
   <div class="panel">
@@ -81,11 +96,15 @@ async function loadModels() {
     const r = await authedFetch('/gateway/models');
     const data = await r.json();
     const sel = $('modelSel');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="" data-i18n="all_models">' + i18n('all_models') + '</option>';
     for (const m of data.models) {
       const opt = document.createElement('option');
       opt.value = m.name; opt.textContent = m.name;
       sel.appendChild(opt);
     }
+    sel.value = prev;
+    renderModelStates(data.models);
     const s = await (await authedFetch('/gateway/status')).json();
     // Multi-slot: aggregate running slots; pools shown in the slots panel.
     const slots = s.slots || {};
@@ -100,6 +119,22 @@ async function loadModels() {
     }
     renderSlots(s);
   } catch (e) {}
+}
+
+// Per-model start feasibility (answers "can this model be started, or is it
+// running"): running / startable / switchable / blocked + the reason when a
+// start is refused right now (resource gate, in-flight requests, transition).
+function renderModelStates(models) {
+  const tb = $('modelStateTable').querySelector('tbody');
+  const labelKey = { running: 'st_running', startable: 'st_startable', switchable: 'st_switchable', blocked: 'st_blocked' };
+  const cls = { running: 'ok', startable: 'ok', switchable: 'warn', blocked: 'err' };
+  tb.innerHTML = models.map(m => {
+    const st = m.state || 'blocked';
+    const reason = st === 'running' ? '' : (m.start_reason || '');
+    return `<tr><td class="wrap">${m.name}</td><td>${m.slot || '—'}</td>
+      <td><span class="tag ${cls[st] || 'err'}">${i18n(labelKey[st] || 'st_blocked')}</span></td>
+      <td class="wrap">${reason}</td></tr>`;
+  }).join('');
 }
 
 function renderSlots(s) {
@@ -236,10 +271,10 @@ async function load() {
   }
 }
 
-$('refreshBtn').onclick = load;
+$('refreshBtn').onclick = () => { load(); loadModels(); };
 $('rangeSel').onchange = load;
 $('modelSel').onchange = load;
-setInterval(load, 15000);
+setInterval(() => { load(); loadModels(); }, 15000);
 loadModels();
 load();
 """,
