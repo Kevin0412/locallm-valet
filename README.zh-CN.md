@@ -1,5 +1,8 @@
 # locallm-valet
 
+本地 JEV 决策模型支持通过 `POST /v1/systemone` 按需启动、显存门控和空闲卸载。
+六个已下载开源配置的接入与调用方法见 [JEV 接入说明](docs/JEV.md)。
+
 [English](README.md) | **简体中文**
 
 **本地 LLM 代客泊车**：空闲时把模型"泊"走（卸载释放显存），要用时"开"回来（按需启动）。
@@ -268,7 +271,7 @@ models:   # 每模型：path、required_vram_gib、required_ram_gib、backend.ex
 ```bash
 pip install -e ".[dev]"
 # 或：pip install locallm-valet
-pytest -v     # 97 个测试，fake memory/runner——无需 GPU
+pytest -v     # 143 个测试，fake memory/runner——无需 GPU
 ```
 
 目录结构：

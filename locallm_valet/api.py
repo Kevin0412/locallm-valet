@@ -204,6 +204,15 @@ def create_app(
         model_name = payload.get("model")
         if not isinstance(model_name, str) or not model_name:
             raise InvalidRequest("missing or invalid 'model' field in request body")
+        model_spec = config.get_model(model_name)
+        if model_spec is not None:
+            typed = model_spec.backend.api_protocol == "systemone"
+            if typed and (request.method != "POST" or request.url.path != "/v1/systemone"):
+                raise InvalidRequest("typed decision models require POST /v1/systemone")
+            if typed and payload.get("stream"):
+                raise InvalidRequest("typed decision models do not support streaming")
+            if not typed and request.url.path == "/v1/systemone":
+                raise InvalidRequest("this model does not support typed decisions")
         started = time.monotonic()
         is_stream = bool(payload.get("stream"))
         # Benchmark requests are tagged so real (external) traffic can preempt
@@ -236,8 +245,8 @@ def create_app(
                     endpoint=request.url.path,
                     stream=is_stream,
                     status=status,
-                    prompt_tokens=(usage or {}).get("prompt_tokens", 0),
-                    completion_tokens=(usage or {}).get("completion_tokens", 0),
+                    prompt_tokens=(usage or {}).get("prompt_tokens", (usage or {}).get("input_tokens", 0)),
+                    completion_tokens=(usage or {}).get("completion_tokens", (usage or {}).get("output_tokens", 0)),
                     duration_ms=(time.monotonic() - started) * 1000.0,
                 )
             except Exception:  # noqa: BLE001 - recording never breaks proxying
@@ -288,6 +297,8 @@ def create_app(
                     "created": 0,
                     "owned_by": "locallm-valet",
                     "slot": ms.get("slot", spec.slot),
+                    "capabilities": spec.capabilities,
+                    "api_protocol": spec.backend.api_protocol,
                     # Declared context (from --context-length) vs the real KV
                     # capacity probed at load time (unknown until loaded).
                     "context_length": spec.configured_context_length(),
@@ -613,6 +624,12 @@ def create_app(
             models = payload.get("models")
             if not isinstance(models, list) or not models:
                 raise InvalidRequest("'models' must be a non-empty list of model names")
+            if any(
+                config.get_model(str(model)) is not None
+                and "text_generation" not in config.get_model(str(model)).capabilities
+                for model in models
+            ):
+                raise InvalidRequest("chat benchmarks require text-generation models")
             # Forward the caller's API key (Bearer token) so the job's requests
             # stay authenticated when the valet has auth enabled.
             auth = request.headers.get("authorization", "")
@@ -712,7 +729,7 @@ def _render_benchmark_page(config: Config) -> str:
     from .benchmark.job import current_job
     from .benchmark.runner import load_speeds
 
-    models = sorted(config.models.keys())
+    models = sorted(name for name, spec in config.models.items() if "text_generation" in spec.capabilities)
     datasets = list_datasets()
     job = current_job().status()
 

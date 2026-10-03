@@ -62,6 +62,8 @@ class ModelBackendArgs:
     # own ``--concurrency``. Only fire more requests than this if the backend
     # can batch them — a single-slot llama.cpp would just queue or 429.
     max_concurrency: int | None = None
+    # Typed decision models use the System One API instead of text generation.
+    api_protocol: str = "openai"
 
 
 @dataclass
@@ -129,6 +131,12 @@ class ModelSpec:
     # memory, dedicated HBM…). Pool names must exist under `pools:`.
     required_pools: dict[str, float] = field(default_factory=dict)
     backend: ModelBackendArgs = field(default_factory=ModelBackendArgs)
+
+    @property
+    def capabilities(self) -> list[str]:
+        if self.backend.api_protocol == "systemone":
+            return ["typed_decision", "choice", "noul", "score"]
+        return ["text_generation"]
 
     def configured_context_length(self) -> int | None:
         """The declared ``--context-length`` from extra_args, if present."""
@@ -290,6 +298,10 @@ def _parse_model_backend(raw: Any, name: str) -> ModelBackendArgs:
             if not isinstance(value, str) or not value.strip():
                 raise ConfigError(f"models.{name}.backend.health_path: expected a non-empty string")
             out.health_path = value
+        elif key == "api_protocol":
+            if value not in ("openai", "systemone"):
+                raise ConfigError(f"models.{name}.backend.api_protocol: expected openai|systemone")
+            out.api_protocol = value
         elif key == "max_concurrency":
             if value is None:
                 out.max_concurrency = None

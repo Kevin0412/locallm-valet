@@ -1,5 +1,9 @@
 # locallm-valet
 
+Local JEV decision models can be managed through `POST /v1/systemone`, with
+on-demand startup, GPU gating and idle unload. See [JEV integration](docs/JEV.md)
+to register the six provisioned open configurations.
+
 **English** | [简体中文](README.zh-CN.md)
 
 A **local LLM valet**: it parks (unloads) your model when idle and brings it back on demand. On a single device with a single active model, it manages **any OpenAI-compatible inference backend on your own machine** — SGLang / vLLM / llama.cpp / OpenVINO / ...
@@ -245,7 +249,7 @@ Env overrides: `LOCALLM_VALET_CONFIG`, `LOCALLM_VALET_HOST`, `LOCALLM_VALET_PORT
 ```bash
 pip install -e ".[dev]"
 # or: pip install locallm-valet
-pytest -v     # 97 tests, fake memory/runner — no GPU required
+pytest -v     # 143 tests, fake memory/runner — no GPU required
 ```
 
 Layout:
